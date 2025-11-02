@@ -3,6 +3,7 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"nofx/market"
 	"nofx/mcp"
 	"strings"
@@ -11,12 +12,19 @@ import (
 // SignalResult 信号检测结果
 type SignalResult struct {
 	Symbol          string   `json:"symbol"`
-	Direction       string   `json:"direction"`       // "long", "short", "none"
-	SignalList      []string `json:"signal_list"`     // 匹配的信号维度列表
-	Score           int      `json:"score"`           // 信号强度分数 (0-100)
+	Direction       string   `json:"direction"`        // "long", "short", "none"
+	SignalList      []string `json:"signal_list"`      // 匹配的信号维度列表
+	Score           int      `json:"score"`            // 信号强度分数 (0-100)
 	ConfidenceLevel string   `json:"confidence_level"` // 信心等级: "high", "medium", "low"
-	Valid           bool     `json:"valid"`           // 是否满足≥3个信号共振
-	Reasoning       string   `json:"reasoning"`       // 分析过程
+	Valid           bool     `json:"valid"`            // 是否满足≥3个信号共振
+	Reasoning       string   `json:"reasoning"`        // 分析过程
+	Scenario        string   `json:"scenario,omitempty"`
+}
+
+type signalAudit struct {
+	count             int
+	scenario          string
+	pullbackConfirmed bool
 }
 
 // SignalAgent 信号检测专家
@@ -51,14 +59,31 @@ func (a *SignalAgent) Detect(symbol string, marketData *market.Data, regime *Reg
 		return nil, fmt.Errorf("解析结果失败: %w\n响应: %s", err, response)
 	}
 
+	audit := a.auditSignals(marketData, regime, result.Direction)
+	result.Scenario = audit.scenario
+
 	// 🚨 零信任原则：Go代码计算信号强度分数，覆盖AI的score
-	result.Score = a.calculateScore(len(result.SignalList), result.Direction, regime)
+	result.Score = a.calculateScore(audit.count, result.Direction, regime)
 
 	// 🚨 Go代码计算信心等级（用于动态仓位大小）
 	result.ConfidenceLevel = a.calculateConfidenceLevel(result.Score)
 
+	// 以Go端重新计算的维度数为准，强制覆盖AI的valid字段
+	result.Valid = audit.count >= SignalMinForValid && result.Direction != "none"
+
+	// 如果是A2趋势下的反弹做空，但尚未完成确认，则直接标记为无效
+	if audit.scenario == ScenarioPullback && !audit.pullbackConfirmed {
+		result.Valid = false
+		if !strings.Contains(result.Reasoning, "回落确认不足") {
+			if strings.TrimSpace(result.Reasoning) != "" {
+				result.Reasoning += " | "
+			}
+			result.Reasoning += "Go校验: 回落确认不足，等待收盘确认"
+		}
+	}
+
 	// Go代码验证（双重保险）
-	if err := a.validateResult(result, regime, marketData); err != nil {
+	if err := a.validateResult(result, regime, audit); err != nil {
 		result.Valid = false
 		result.Reasoning += fmt.Sprintf(" [验证失败: %v]", err)
 	}
@@ -87,6 +112,7 @@ func (a *SignalAgent) buildPrompt(symbol string, marketData *market.Data, regime
 
 	if marketData.LongerTermContext != nil {
 		sb.WriteString("**4h数据**:\n")
+		sb.WriteString(fmt.Sprintf("- 4h EMA20: %.4f\n", marketData.LongerTermContext.EMA20))
 		sb.WriteString(fmt.Sprintf("- 4h EMA50: %.4f\n", marketData.LongerTermContext.EMA50))
 		sb.WriteString(fmt.Sprintf("- 4h EMA200: %.4f\n", marketData.LongerTermContext.EMA200))
 		sb.WriteString(fmt.Sprintf("- 4h ATR14: %.4f\n", marketData.LongerTermContext.ATR14))
@@ -127,33 +153,45 @@ func (a *SignalAgent) buildPrompt(symbol string, marketData *market.Data, regime
 
 	sb.WriteString("**维度2: 动量指标**\n")
 	sb.WriteString("```\n")
-	sb.WriteString("做多: (4h MACD > 0 且上升) OR (1h RSI从超卖区<30反弹)\n")
-	sb.WriteString("做空: (4h MACD < 0 且下降) OR (1h RSI从超买区>70回落)\n")
+	sb.WriteString("做多: (4h MACD > 0 且上升) OR (1h RSI曾跌破30并回升至>35)\n")
+	sb.WriteString("做空: (4h MACD < 0) 且 (1h RSI曾超买>70，并已回落到<65)\n")
 	sb.WriteString("```\n")
 	sb.WriteString("**要求**: reasoning中必须写 `维度2(动量): MACD=X.XX 或 RSI=X.XX → 满足/不满足`\n\n")
 
 	sb.WriteString("**维度3: 位置/技术形态**\n")
 	sb.WriteString("```\n")
-	sb.WriteString("做多: 价格回踩EMA20支撑企稳 OR 突破关键阻力\n")
-	sb.WriteString("做空: 价格反弹至EMA20阻力受阻 OR 跌破关键支撑\n")
+	sb.WriteString("做多(A1/B): 价格回踩 1h EMA20 支撑企稳，或突破关键阻力并站稳\n")
+	sb.WriteString("做空(A2趋势): 必须满足两个条件：\n")
+	sb.WriteString("  条件1: 价格曾反弹至 [4h EMA20 ~ 4h EMA50] 阻力区（至少触及4h EMA20附近）\n")
+	sb.WriteString("  条件2: 价格已重新跌回 1h EMA20 下方（收盘价确认，至少2根1h K线）\n")
+	sb.WriteString("  ⚠️ 缺一不可！仅价格低于1h EMA20但未触及4h阻力区 → 不满足（抢跑）\n")
+	sb.WriteString("做空(B震荡): 价格触及震荡上轨并出现反转信号\n")
 	sb.WriteString("```\n")
-	sb.WriteString("**要求**: reasoning中必须写 `维度3(位置): 价格X.XX vs EMA20=X.XX → 满足/不满足`\n\n")
+	sb.WriteString("**要求**:\n")
+	sb.WriteString("- (A1/B做多): reasoning中必须写 `维度3(位置): 价格[X.XX] vs 1h_EMA20=[X.XX] → 满足/不满足`\n")
+	sb.WriteString("- (A2做空): reasoning中必须写 `维度3(位置): 条件1: 价格[最高触及Y.YY] vs [4h_EMA20=X.XX ~ 4h_EMA50=Z.ZZ] → [满足/不满足]; 条件2: 当前价格[W.WW] vs 1h_EMA20=[V.VV] → [满足/不满足]; 综合 → [满足/不满足]`\n\n")
 
 	sb.WriteString("**维度4: 资金/成交量（最容易作弊的维度！）**\n")
 	sb.WriteString("```\n")
-	sb.WriteString("A2下降趋势做空: 成交量放大(>+20%) OR 缩量反弹(<-50%)\n")
-	sb.WriteString("A1上升趋势做多: 成交量放大(>+20%) OR 缩量回调(<-50%)\n")
-	sb.WriteString("震荡市(B)做多/做空: 成交量放大(>+20%)\n")
+	sb.WriteString("A2趋势做空: 只有在“反弹确认结束”后，缩量反弹(<-50%) 或 成交量放大(>+20%) 才算有效\n")
+	sb.WriteString("A1趋势做多: 成交量放大(>+20%) 或 缩量回调(<-50%)\n")
+	sb.WriteString("震荡市(B): 仅接受成交量放大(>+20%)\n")
 	sb.WriteString("```\n")
 	sb.WriteString("⚠️ **严格要求**：\n")
-	sb.WriteString("- 如果成交量变化是-64.07%，在A2下降趋势做空时**满足**缩量反弹(<-50%)条件\n")
-	sb.WriteString("- 如果成交量变化是-30%，**不满足**任何条件（既不是>+20%，也不是<-50%）\n")
-	sb.WriteString("- 如果成交量变化是+25%，**满足**成交量放大(>+20%)条件\n")
+	sb.WriteString("- 缩量反弹只有在“收盘价确认跌回EMA20下方”之后才可计入维度4\n")
+	sb.WriteString("- 仅出现缩量但价格仍在EMA20上方 → **不满足**\n")
+	sb.WriteString("- 成交量变化+25% → 满足放大条件；-30% → 不满足任何条件\n")
 	sb.WriteString("- reasoning中必须写：\n")
 	sb.WriteString("  - `维度4(成交量): 成交量变化[+X.XX%] > +20% → 满足` 或\n")
-	sb.WriteString("  - `维度4(成交量): 成交量变化[-X.XX%] < -50% (缩量反弹/回调) → 满足` 或\n")
+	sb.WriteString("  - `维度4(成交量): 成交量变化[-X.XX%] < -50%，且价格已确认跌回EMA20下方 → 满足` 或\n")
 	sb.WriteString("  - `维度4(成交量): 成交量变化[-30%] 不满足任何条件 → 不满足`\n")
-	sb.WriteString("- **禁止**：声称满足维度4，但实际数值不符合任何条件！\n\n")
+	sb.WriteString("- **禁止**：价格仍在EMA20上方却声称维度4满足缩量条件！\n\n")
+
+	sb.WriteString("🚨 **A2反弹做空特别提醒**：\n")
+	sb.WriteString("- RSI(1h) 必须先超买>70再回落到<65\n")
+	sb.WriteString("- 收盘价连续2根1h确认跌回1h EMA20下方\n")
+	sb.WriteString("- 缩量反弹只有在上述确认完成后才有效\n")
+	sb.WriteString("- 禁止在价格仍高于EMA20时提前开空\n\n")
 
 	sb.WriteString("**维度5: 情绪/持仓**\n")
 	sb.WriteString("```\n")
@@ -209,7 +247,7 @@ func (a *SignalAgent) parseResult(response string) (*SignalResult, error) {
 }
 
 // validateResult Go代码验证（双重保险 + 硬验证市场数据）
-func (a *SignalAgent) validateResult(result *SignalResult, regime *RegimeResult, marketData *market.Data) error {
+func (a *SignalAgent) validateResult(result *SignalResult, regime *RegimeResult, audit signalAudit) error {
 	// 验证direction
 	validDirections := map[string]bool{"long": true, "short": true, "none": true}
 	if !validDirections[result.Direction] {
@@ -235,123 +273,99 @@ func (a *SignalAgent) validateResult(result *SignalResult, regime *RegimeResult,
 	}
 
 	// 验证信号数量
-	if result.Valid && len(result.SignalList) < 3 {
-		return fmt.Errorf("valid=true但信号列表只有%d个（需≥3个）", len(result.SignalList))
+	if result.Valid && audit.count < SignalMinForValid {
+		return fmt.Errorf("valid=true但Go重新计算只有%d个信号（需≥%d个）", audit.count, SignalMinForValid)
 	}
 
-	// 🚨 新增：Go代码硬验证 - 重新计算所有信号维度，防止AI作弊
-	if result.Valid && result.Direction != "none" {
-		actualSignals := a.recalculateSignals(marketData, regime, result.Direction)
-		if actualSignals < 3 {
-			return fmt.Errorf("🚨 AI作弊检测：AI声称有%d个信号，但Go代码重新计算只有%d个有效信号（需≥3个）",
-				len(result.SignalList), actualSignals)
-		}
+	if audit.scenario == ScenarioPullback && !audit.pullbackConfirmed {
+		return fmt.Errorf("反弹确认尚未完成，信号无效")
 	}
 
 	return nil
 }
 
-// recalculateSignals Go代码重新计算所有信号维度（Zero-Trust验证）
-func (a *SignalAgent) recalculateSignals(marketData *market.Data, regime *RegimeResult, direction string) int {
-	validSignals := 0
-
-	// 维度1: 体制/趋势匹配
-	if direction == "long" && (regime.Regime == "A1" || regime.Regime == "B") {
-		validSignals++
-	} else if direction == "short" && (regime.Regime == "A2" || regime.Regime == "B") {
-		validSignals++
+// auditSignals Go代码重新计算所有信号维度（Zero-Trust验证）
+func (a *SignalAgent) auditSignals(marketData *market.Data, regime *RegimeResult, direction string) signalAudit {
+	audit := signalAudit{
+		count:             0,
+		scenario:          ScenarioTrend,
+		pullbackConfirmed: true,
 	}
 
-	// 维度2: 动量指标
-	if marketData.LongerTermContext != nil {
+	if marketData == nil || direction == "" || direction == "none" {
+		return audit
+	}
+
+	switch regime.Regime {
+	case "A1":
 		if direction == "long" {
-			// 做多：MACD>0 OR RSI从超卖区反弹
-			if marketData.CurrentMACD > 0 || (marketData.CurrentRSI7 > 30 && marketData.CurrentRSI7 < 50) {
-				validSignals++
-			}
-		} else if direction == "short" {
-			// 做空：MACD<0 OR RSI从超买区回落
-			if marketData.CurrentMACD < 0 || (marketData.CurrentRSI7 < 70 && marketData.CurrentRSI7 > 50) {
-				validSignals++
-			}
-		}
-	}
-
-	// 维度3: 位置/技术形态
-	currentPrice := marketData.CurrentPrice
-	ema20 := marketData.CurrentEMA20
-	if direction == "long" {
-		// 做多：价格在EMA20附近或之上
-		if currentPrice >= ema20*0.98 {
-			validSignals++
-		}
-	} else if direction == "short" {
-		// 做空：价格在EMA20附近或之下
-		if currentPrice <= ema20*1.02 {
-			validSignals++
-		}
-	}
-
-	// 维度4: 资金/成交量（最容易作弊的维度，严格验证）
-	if marketData.LongerTermContext != nil {
-		volumeChange := 0.0
-		if marketData.LongerTermContext.AverageVolume > 0 {
-			volumeChange = ((marketData.LongerTermContext.CurrentVolume - marketData.LongerTermContext.AverageVolume) / marketData.LongerTermContext.AverageVolume) * 100
-		}
-
-		// 🚨 关键：不同体制下的成交量信号规则（使用统一常量）
-		if direction == "short" && regime.Regime == "A2" {
-			// A2下降趋势中做空：成交量放大 OR 缩量反弹
-			if volumeChange > VolumeExpandThreshold || volumeChange < VolumeShrinkThreshold {
-				validSignals++
-			}
-		} else if direction == "long" && regime.Regime == "A1" {
-			// A1上升趋势中做多：成交量放大 OR 缩量回调
-			if volumeChange > VolumeExpandThreshold || volumeChange < VolumeShrinkThreshold {
-				validSignals++
-			}
+			audit.scenario = ScenarioBreakout
 		} else {
-			// 其他情况（震荡市B）：只接受成交量放大
-			if volumeChange > VolumeExpandThreshold {
-				validSignals++
+			audit.scenario = ScenarioCountertrend
+		}
+	case "A2":
+		if direction == "short" {
+			audit.scenario = ScenarioPullback
+		} else {
+			audit.scenario = ScenarioCountertrend
+		}
+	case "B":
+		audit.scenario = ScenarioRange
+	default:
+		audit.scenario = ScenarioTrend
+	}
+
+	if (direction == "long" && (regime.Regime == "A1" || regime.Regime == "B")) ||
+		(direction == "short" && (regime.Regime == "A2" || regime.Regime == "B")) {
+		audit.count++
+	}
+
+	if audit.scenario == ScenarioPullback {
+		rsiConfirmed := checkRSIOverboughtReturn(marketData)
+		positionConfirmed := checkPullbackPosition(marketData)
+		audit.pullbackConfirmed = rsiConfirmed && positionConfirmed
+
+		if audit.pullbackConfirmed {
+			// 动量与位置两项同时满足才计入 (视为维度2+维度3)
+			audit.count += 2
+
+			if checkPullbackVolume(marketData) {
+				audit.count++
+			}
+			if checkFunding(direction, marketData) {
+				audit.count++
 			}
 		}
-		// TODO: 添加OI增长验证（如果有OI数据）
+	} else {
+		if checkMomentum(direction, marketData) {
+			audit.count++
+		}
+		if checkPosition(direction, marketData) {
+			audit.count++
+		}
+		if checkVolumeExpansion(marketData) {
+			audit.count++
+		}
+		if checkFunding(direction, marketData) {
+			audit.count++
+		}
 	}
 
-	// 维度5: 情绪/持仓（使用统一常量）
-	fundingRate := marketData.FundingRate * 100 // 转换为百分比
-	if direction == "long" && fundingRate < 0 {
-		validSignals++
-	} else if direction == "short" && fundingRate > FundingRateShortThreshold {
-		validSignals++
-	}
-
-	return validSignals
+	return audit
 }
 
 // calculateScore Go代码计算信号强度分数（零信任原则）
-// 规则：基础分50 + 每个信号12分 + 体制完美匹配10分
-// 使用统一的评分常量
 func (a *SignalAgent) calculateScore(signalCount int, direction string, regime *RegimeResult) int {
-	score := SignalBaseScore // 基础分50
-
-	// 每个信号 +12分
-	score += signalCount * SignalPerDimensScore
-
-	// 体制完美匹配 +10分
-	isPerfectMatch := false
-	if direction == "long" && regime.Regime == "A1" {
-		isPerfectMatch = true // 上升趋势做多
-	} else if direction == "short" && regime.Regime == "A2" {
-		isPerfectMatch = true // 下降趋势做空
+	if signalCount < 0 {
+		signalCount = 0
 	}
 
-	if isPerfectMatch {
+	score := SignalBaseScore + signalCount*SignalPerDimensScore
+
+	if (direction == "long" && regime.Regime == "A1") || (direction == "short" && regime.Regime == "A2") {
 		score += SignalPerfectBonus
 	}
 
-	// 确保分数在合理范围内
 	if score > 100 {
 		score = 100
 	}
@@ -360,6 +374,307 @@ func (a *SignalAgent) calculateScore(signalCount int, direction string, regime *
 	}
 
 	return score
+}
+
+func checkMomentum(direction string, data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+
+	switch direction {
+	case "long":
+		if data.CurrentMACD > 0 {
+			return true
+		}
+		return recoveredFromOversold(data)
+	case "short":
+		if data.CurrentMACD < 0 {
+			return true
+		}
+		return cooledFromOverbought(data)
+	default:
+		return false
+	}
+}
+
+func checkPosition(direction string, data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+
+	price := data.CurrentPrice
+	ema20 := data.CurrentEMA20
+	if ema20 <= 0 {
+		return false
+	}
+
+	tolerance := EMA20TolerancePct
+
+	switch direction {
+	case "long":
+		return price >= ema20*(1.0-tolerance)
+	case "short":
+		return price <= ema20*(1.0+tolerance)
+	default:
+		return false
+	}
+}
+
+func checkRSIOverboughtReturn(data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+
+	current := data.CurrentRSI7
+	if current >= 65 {
+		return false
+	}
+
+	if data.IntradaySeries == nil {
+		return false
+	}
+
+	series := data.IntradaySeries.RSI7Values
+	if len(series) == 0 {
+		return false
+	}
+
+	lookback := minInt(len(series), 40)
+	maxRSI := -1.0
+	maxIdx := -1
+	for i := len(series) - lookback; i < len(series); i++ {
+		if i < 0 {
+			continue
+		}
+		if series[i] > maxRSI {
+			maxRSI = series[i]
+			maxIdx = i
+		}
+	}
+
+	// 必须在近 40 根（≈2 小时）内曾经显著超买
+	if maxRSI < 72 {
+		return false
+	}
+
+	// 超买点必须距离当前不超过约 60 分钟
+	if len(series)-1-maxIdx > 20 {
+		return false
+	}
+
+	return true
+}
+
+func checkPullbackPosition(data *market.Data) bool {
+	if data == nil || data.LongerTermContext == nil {
+		return false
+	}
+
+	currentEMA20 := data.CurrentEMA20
+	if currentEMA20 <= 0 {
+		return false
+	}
+
+	price := data.CurrentPrice
+
+	// ✅ 条件1: 价格必须已经重新跌回 1h EMA20 下方（V4.0）
+	if price > currentEMA20*(1.0-EMA20TolerancePct) {
+		return false // 还在反弹中，尚未确认
+	}
+
+	// ✅ 条件2: 需要至少两根 1h 确认K（≈ 60 分钟）的收盘价低于 1h EMA20
+	// 并确认先前曾站上 EMA20（确认这是"反弹失败"而非"一路下跌"）
+	if !confirmedBelowOneHourEMA(data, currentEMA20) {
+		return false // 可能是假跌破
+	}
+
+	// ✅ 条件3: 必须曾经触及 4h EMA20 ~ EMA50 阻力带（V4.0耐心逻辑）
+	if !touchedFourHourBand(data) {
+		return false // 价格还在半路上，抢跑了
+	}
+
+	// 🎯 同时满足三个条件：反弹到位 + 确认跌回 + 持续在下方
+	return true
+}
+
+func checkPullbackVolume(data *market.Data) bool {
+	change, ok := computeVolumeChange(data)
+	if !ok {
+		return false
+	}
+	return change <= VolumeShrinkThreshold
+}
+
+func confirmedBelowOneHourEMA(data *market.Data, ema20 float64) bool {
+	if data == nil || data.IntradaySeries == nil {
+		return false
+	}
+
+	prices := data.IntradaySeries.MidPrices
+	if len(prices) == 0 {
+		return false
+	}
+
+	required := minInt(len(prices), 20) // 约 60 分钟
+	lowerThreshold := ema20 * (1.0 - EMA20TolerancePct)
+	upperThreshold := ema20 * (1.0 + EMA20TolerancePct/2)
+	aboveSeen := false
+	for i := len(prices) - required; i < len(prices); i++ {
+		if i < 0 {
+			continue
+		}
+		if prices[i] >= upperThreshold {
+			aboveSeen = true
+		}
+		if prices[i] > lowerThreshold {
+			return false
+		}
+	}
+
+	if !aboveSeen {
+		lookback := minInt(len(prices), 60)
+		for i := len(prices) - required - lookback; i < len(prices)-required; i++ {
+			if i < 0 {
+				continue
+			}
+			if prices[i] >= upperThreshold {
+				aboveSeen = true
+				break
+			}
+		}
+	}
+
+	return aboveSeen
+}
+
+func touchedFourHourBand(data *market.Data) bool {
+	if data == nil || data.IntradaySeries == nil || data.LongerTermContext == nil {
+		return false
+	}
+
+	ema4h20 := data.LongerTermContext.EMA20
+	ema4h50 := data.LongerTermContext.EMA50
+	atr := data.LongerTermContext.ATR14
+
+	if ema4h20 <= 0 || ema4h50 <= 0 || atr <= 0 {
+		return false
+	}
+
+	// 定义阻力区：取4h EMA20和EMA50中较小的作为下限
+	bandLow := math.Min(ema4h20, ema4h50)
+
+	// V4.0: 价格必须至少触及阻力区下限（4h EMA20附近）
+	// 使用0.5*ATR作为缓冲区（比之前的2%更合理）
+	resistanceFloor := bandLow - (0.5 * atr)
+
+	prices := data.IntradaySeries.MidPrices
+	if len(prices) == 0 {
+		return false
+	}
+
+	// 查看最近80根3分钟K线（约4小时）
+	lookback := minInt(len(prices), 80)
+	maxPrice := -math.MaxFloat64
+
+	for i := len(prices) - lookback; i < len(prices); i++ {
+		if i < 0 {
+			continue
+		}
+		p := prices[i]
+		if p > maxPrice {
+			maxPrice = p
+		}
+	}
+
+	// V4.0核心逻辑：最高价必须至少触及阻力区下限（耐心等待）
+	if maxPrice < resistanceFloor {
+		return false // 价格还在半路上，太早了
+	}
+
+	// 如果价格进入阻力区内部或突破上限，都算触及
+	return true
+}
+
+func checkVolumeExpansion(data *market.Data) bool {
+	change, ok := computeVolumeChange(data)
+	return ok && change >= VolumeExpandThreshold
+}
+
+func computeVolumeChange(data *market.Data) (float64, bool) {
+	if data == nil || data.LongerTermContext == nil {
+		return 0, false
+	}
+	avg := data.LongerTermContext.AverageVolume
+	if avg <= 0 {
+		return 0, false
+	}
+	change := ((data.LongerTermContext.CurrentVolume - avg) / avg) * 100
+	return change, true
+}
+
+func checkFunding(direction string, data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	funding := data.FundingRate * 100
+	if direction == "long" {
+		return funding < 0
+	}
+	if direction == "short" {
+		return funding > FundingRateShortThreshold
+	}
+	return false
+}
+
+func recoveredFromOversold(data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	current := data.CurrentRSI7
+	if current <= 35 {
+		return false
+	}
+	if data.IntradaySeries == nil {
+		return current > 35
+	}
+	series := data.IntradaySeries.RSI7Values
+	lookback := minInt(len(series), 40)
+	foundOversold := false
+	for i := len(series) - lookback; i < len(series); i++ {
+		if i >= 0 && series[i] < 30 {
+			foundOversold = true
+			break
+		}
+	}
+	return foundOversold && current > 35
+}
+
+func cooledFromOverbought(data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	current := data.CurrentRSI7
+	if current >= 65 {
+		return false
+	}
+	if data.IntradaySeries == nil {
+		return false
+	}
+	series := data.IntradaySeries.RSI7Values
+	lookback := minInt(len(series), 40)
+	for i := len(series) - lookback; i < len(series); i++ {
+		if i >= 0 && series[i] > 70 {
+			return true
+		}
+	}
+	return false
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // calculateConfidenceLevel Go代码计算信心等级（零信任原则）
