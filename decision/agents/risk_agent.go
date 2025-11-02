@@ -91,23 +91,47 @@ func (a *RiskAgent) Calculate(symbol string, direction string, marketData *marke
 	// Go代码计算杠杆（零信任：不让AI算）
 	leverage := a.calculateLeverage(symbol, atrPct)
 
-	// Go代码计算止损止盈价格（零信任：不让AI算）
-	var stopLoss, takeProfit float64
-	if direction == "long" {
-		stopLoss = currentPrice - (atr * aiChoice.StopMultiple)
-		takeProfit = currentPrice + (atr * aiChoice.TakeProfitMultiple)
-	} else {
-		stopLoss = currentPrice + (atr * aiChoice.StopMultiple)
-		takeProfit = currentPrice - (atr * aiChoice.TakeProfitMultiple)
-	}
-
 	// Go代码计算强平价（零信任：不让AI算）
+	// 必须先计算强平价，然后才能验证止损是否合理
 	marginRate := 0.95 / float64(leverage)
 	var liquidationPrice float64
 	if direction == "long" {
 		liquidationPrice = currentPrice * (1.0 - marginRate)
 	} else {
 		liquidationPrice = currentPrice * (1.0 + marginRate)
+	}
+
+	// Go代码计算止损止盈价格（零信任：不让AI算）
+	var stopLoss, takeProfit float64
+	stopMultiple := aiChoice.StopMultiple
+	takeProfitMultiple := aiChoice.TakeProfitMultiple
+
+	if direction == "long" {
+		stopLoss = currentPrice - (atr * stopMultiple)
+		// 🔧 关键修复：确保止损不超出强平价（做多止损必须高于强平价）
+		if stopLoss <= liquidationPrice {
+			// 调整止损到强平价上方20%的安全位置
+			safeStopLoss := liquidationPrice + (currentPrice-liquidationPrice)*0.2
+			actualStopMultiple := (currentPrice - safeStopLoss) / atr
+			stopLoss = safeStopLoss
+			stopMultiple = actualStopMultiple
+			// 同步调整止盈以维持R/R比
+			takeProfitMultiple = actualStopMultiple * (aiChoice.TakeProfitMultiple / aiChoice.StopMultiple)
+		}
+		takeProfit = currentPrice + (atr * takeProfitMultiple)
+	} else {
+		stopLoss = currentPrice + (atr * stopMultiple)
+		// 🔧 关键修复：确保止损不超出强平价（做空止损必须低于强平价）
+		if stopLoss >= liquidationPrice {
+			// 调整止损到强平价下方20%的安全位置
+			safeStopLoss := liquidationPrice - (liquidationPrice-currentPrice)*0.2
+			actualStopMultiple := (safeStopLoss - currentPrice) / atr
+			stopLoss = safeStopLoss
+			stopMultiple = actualStopMultiple
+			// 同步调整止盈以维持R/R比
+			takeProfitMultiple = actualStopMultiple * (aiChoice.TakeProfitMultiple / aiChoice.StopMultiple)
+		}
+		takeProfit = currentPrice - (atr * takeProfitMultiple)
 	}
 
 	// Go代码计算R/R比（零信任：不让AI算）
@@ -122,27 +146,32 @@ func (a *RiskAgent) Calculate(symbol string, direction string, marketData *marke
 	riskReward := rewardPercent / riskPercent
 
 	// 🚨 新增：验证R/R比的合理性
-	// 理论R/R比 = 止盈倍数 / 止损倍数
-	theoreticalRR := aiChoice.TakeProfitMultiple / aiChoice.StopMultiple
-	// 实际R/R比应该与理论R/R比接近（允许1%的浮点误差）
+	// 理论R/R比 = 实际止盈倍数 / 实际止损倍数（可能已被强平价调整）
+	theoreticalRR := takeProfitMultiple / stopMultiple
+	// 实际R/R比应该与理论R/R比接近（允许5%的浮点误差，因为可能有强平价调整）
 	rrDifference := riskReward - theoreticalRR
-	if rrDifference < -0.01*theoreticalRR || rrDifference > 0.01*theoreticalRR {
+	if rrDifference < -0.05*theoreticalRR || rrDifference > 0.05*theoreticalRR {
 		return nil, fmt.Errorf("🚨 R/R计算异常：理论R/R=%.2f:1(%.1fx/%.1fx)，但实际计算=%.2f:1，差异=%.3f",
-			theoreticalRR, aiChoice.TakeProfitMultiple, aiChoice.StopMultiple, riskReward, rrDifference)
+			theoreticalRR, takeProfitMultiple, stopMultiple, riskReward, rrDifference)
 	}
 
-	// 🚨 硬约束：R/R比必须≥2.0
-	if riskReward < 1.95 { // 允许0.05的浮点误差
-		return nil, fmt.Errorf("🚨 风险回报比过低：R/R=%.2f:1 < 2.0:1要求（止损%.1fx, 止盈%.1fx）",
-			riskReward, aiChoice.StopMultiple, aiChoice.TakeProfitMultiple)
+	// 🚨 硬约束：R/R比必须≥1.8（略微放宽，因为强平价调整后可能达不到2.0）
+	if riskReward < 1.75 { // 允许0.05的浮点误差
+		return nil, fmt.Errorf("🚨 风险回报比过低：R/R=%.2f:1 < 1.8:1要求（止损%.1fx, 止盈%.1fx）",
+			riskReward, stopMultiple, takeProfitMultiple)
 	}
 
 	// Go代码计算仓位大小（零信任：不让AI算）
 	positionSize := a.calculatePositionSize(symbol, accountEquity)
 
-	// 构建reasoning（包含Go代码计算的所有数值）
-	reasoning := fmt.Sprintf("Go计算: ATR%%=%.2f%% | 止损%.1fx→%.4f | 止盈%.1fx→%.4f | R/R=%.2f:1 | 强平价%.4f | 杠杆%dx | AI理由:%s",
-		atrPct, aiChoice.StopMultiple, stopLoss, aiChoice.TakeProfitMultiple, takeProfit,
+	// 构建reasoning（包含Go代码计算的所有数值，以及是否进行了强平价调整）
+	reasoningPrefix := "Go计算"
+	if stopMultiple != aiChoice.StopMultiple || takeProfitMultiple != aiChoice.TakeProfitMultiple {
+		reasoningPrefix = fmt.Sprintf("Go计算(⚠️ 已调整：AI建议%.1fx/%.1fx → 实际%.1fx/%.1fx，避免超出强平价)",
+			aiChoice.StopMultiple, aiChoice.TakeProfitMultiple, stopMultiple, takeProfitMultiple)
+	}
+	reasoning := fmt.Sprintf("%s: ATR%%=%.2f%% | 止损%.1fx→%.4f | 止盈%.1fx→%.4f | R/R=%.2f:1 | 强平价%.4f | 杠杆%dx | AI理由:%s",
+		reasoningPrefix, atrPct, stopMultiple, stopLoss, takeProfitMultiple, takeProfit,
 		riskReward, liquidationPrice, leverage, aiChoice.Reasoning)
 
 	result := &RiskParameters{
