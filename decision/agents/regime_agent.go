@@ -90,7 +90,7 @@ func (a *RegimeAgent) buildPrompt(btcData *market.Data, atrPct float64) string {
 
 	sb.WriteString("**STEP 2: 判断波动率类型**\n")
 	sb.WriteString("```\n")
-	sb.WriteString("IF (ATR% < 1.0%):\n")
+	sb.WriteString(fmt.Sprintf("IF (ATR%% < %.1f%%):\n", ATRPctNarrowC))
 	sb.WriteString("    体制 = (C) 窄幅盘整\n")
 	sb.WriteString("    策略 = wait (禁止开仓)\n")
 	sb.WriteString("    停止判断，直接输出JSON\n")

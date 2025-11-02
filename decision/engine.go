@@ -1013,22 +1013,22 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			}
 		}
 
-		// 硬约束：风险回报比必须≥2.0（统一为1:2）
-		// 由于浮点数精度问题和ATR计算的四舍五入，给予0.10的容差
-		const minRiskRewardRatio = 1.90 // 实际目标2.0，但允许1.90-2.0的浮点数误差
+		// 硬约束：风险回报比必须≥2.0（使用统一常量）
+		// 由于浮点数精度问题和ATR计算的四舍五入，给予5%的容差
+		minRiskRewardRatio := agents.MinRiskReward * (1.0 - agents.RRFloatTolerance) // 2.0 * 0.95 = 1.90
 		if riskRewardRatio < minRiskRewardRatio {
-			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥2.0:1 [当前价:%.4f 风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
-				riskRewardRatio, currentPrice, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
+			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥%.1f:1 [当前价:%.4f 风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
+				riskRewardRatio, agents.MinRiskReward, currentPrice, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
 		}
 
 		// 🚨 硬约束：强平价校验（防止止损失效导致100%保证金损失）
 		// 这是最关键的风控检查，必须在Go代码中独立验证，不能信任AI的计算
 		var liquidationPrice float64
-		// 留 5% 的安全余量 (0.95 / 杠杆)，与Prompt保持一致
-		marginRate := 0.95 / float64(d.Leverage)
+		// 使用统一的强平保证金率常量
+		marginRate := agents.LiquidationMarginRate / float64(d.Leverage)
 
 		if d.Action == "open_long" {
-			// 做多: 强平价 = 入场价 * (1 - 0.95/杠杆)
+			// 做多: 强平价 = 入场价 * (1 - marginRate)
 			liquidationPrice = currentPrice * (1.0 - marginRate)
 			// 做多止损必须高于强平价，否则会先被强平而不是止损
 			if d.StopLoss <= liquidationPrice {
@@ -1036,7 +1036,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 					d.StopLoss, liquidationPrice, currentPrice, d.Leverage)
 			}
 		} else if d.Action == "open_short" {
-			// 做空: 强平价 = 入场价 * (1 + 0.95/杠杆)
+			// 做空: 强平价 = 入场价 * (1 + marginRate)
 			liquidationPrice = currentPrice * (1.0 + marginRate)
 			// 做空止损必须低于强平价，否则会先被强平而不是止损
 			if d.StopLoss >= liquidationPrice {

@@ -221,7 +221,7 @@ func (o *DecisionOrchestrator) GetFullDecision(ctx *Context) (*FullDecision, err
 			}
 
 			marketData := ctx.MarketDataMap[sr.symbol]
-			riskParams, err := o.riskAgent.Calculate(sr.symbol, sr.signal.Direction, sr.signal.ConfidenceLevel, marketData, regime, ctx.Account.TotalEquity)
+			riskParams, err := o.riskAgent.Calculate(sr.symbol, sr.signal.Direction, sr.signal.ConfidenceLevel, marketData, regime, ctx.Account.TotalEquity, ctx.Account.AvailableBalance)
 			if err != nil {
 				log.Printf("⚠️  RiskAgent计算%s风险失败: %v", sr.symbol, err)
 				cotBuilder.WriteString(fmt.Sprintf("**%s**: 风险计算失败 - %v\n\n", sr.symbol, err))

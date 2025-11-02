@@ -299,33 +299,31 @@ func (a *SignalAgent) recalculateSignals(marketData *market.Data, regime *Regime
 			volumeChange = ((marketData.LongerTermContext.CurrentVolume - marketData.LongerTermContext.AverageVolume) / marketData.LongerTermContext.AverageVolume) * 100
 		}
 
-		// 🚨 关键：不同体制下的成交量信号规则
+		// 🚨 关键：不同体制下的成交量信号规则（使用统一常量）
 		if direction == "short" && regime.Regime == "A2" {
-			// A2下降趋势中做空：成交量放大(>20%) 或 缩量反弹(<-50%) 都是有效信号
-			// 技术分析：下降趋势中的缩量反弹通常意味着反弹无力，是做空机会
-			if volumeChange > 20.0 || volumeChange < -50.0 {
+			// A2下降趋势中做空：成交量放大 OR 缩量反弹
+			if volumeChange > VolumeExpandThreshold || volumeChange < VolumeShrinkThreshold {
 				validSignals++
 			}
 		} else if direction == "long" && regime.Regime == "A1" {
-			// A1上升趋势中做多：成交量放大(>20%) 或 缩量回调(<-50%) 都是有效信号
-			// 技术分析：上升趋势中的缩量回调通常意味着回调无力，是做多机会
-			if volumeChange > 20.0 || volumeChange < -50.0 {
+			// A1上升趋势中做多：成交量放大 OR 缩量回调
+			if volumeChange > VolumeExpandThreshold || volumeChange < VolumeShrinkThreshold {
 				validSignals++
 			}
 		} else {
 			// 其他情况（震荡市B）：只接受成交量放大
-			if volumeChange > 20.0 {
+			if volumeChange > VolumeExpandThreshold {
 				validSignals++
 			}
 		}
 		// TODO: 添加OI增长验证（如果有OI数据）
 	}
 
-	// 维度5: 情绪/持仓
+	// 维度5: 情绪/持仓（使用统一常量）
 	fundingRate := marketData.FundingRate * 100 // 转换为百分比
 	if direction == "long" && fundingRate < 0 {
 		validSignals++
-	} else if direction == "short" && fundingRate > 0.01 {
+	} else if direction == "short" && fundingRate > FundingRateShortThreshold {
 		validSignals++
 	}
 
@@ -333,14 +331,15 @@ func (a *SignalAgent) recalculateSignals(marketData *market.Data, regime *Regime
 }
 
 // calculateScore Go代码计算信号强度分数（零信任原则）
-// 规则：基础分60 + 每个信号10分 + 体制完美匹配20分
+// 规则：基础分50 + 每个信号12分 + 体制完美匹配10分
+// 使用统一的评分常量
 func (a *SignalAgent) calculateScore(signalCount int, direction string, regime *RegimeResult) int {
-	score := 60 // 基础分
+	score := SignalBaseScore // 基础分50
 
-	// 每个信号 +10分
-	score += signalCount * 10
+	// 每个信号 +12分
+	score += signalCount * SignalPerDimensScore
 
-	// 体制完美匹配 +20分
+	// 体制完美匹配 +10分
 	isPerfectMatch := false
 	if direction == "long" && regime.Regime == "A1" {
 		isPerfectMatch = true // 上升趋势做多
@@ -349,7 +348,7 @@ func (a *SignalAgent) calculateScore(signalCount int, direction string, regime *
 	}
 
 	if isPerfectMatch {
-		score += 20
+		score += SignalPerfectBonus
 	}
 
 	// 确保分数在合理范围内

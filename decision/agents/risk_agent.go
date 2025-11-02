@@ -48,7 +48,7 @@ func NewRiskAgent(mcpClient *mcp.Client, btcEthLeverage, altcoinLeverage int) *R
 }
 
 // Calculate 计算风险参数（Zero-Trust：Go代码做所有数学计算）
-func (a *RiskAgent) Calculate(symbol string, direction string, confidenceLevel string, marketData *market.Data, regime *RegimeResult, accountEquity float64) (*RiskParameters, error) {
+func (a *RiskAgent) Calculate(symbol string, direction string, confidenceLevel string, marketData *market.Data, regime *RegimeResult, accountEquity, availableBalance float64) (*RiskParameters, error) {
 	if marketData == nil || marketData.LongerTermContext == nil {
 		return nil, fmt.Errorf("市场数据不完整")
 	}
@@ -73,16 +73,21 @@ func (a *RiskAgent) Calculate(symbol string, direction string, confidenceLevel s
 		return nil, fmt.Errorf("AI选择的止盈倍数%.1f超出合理范围[6.0-20.0]", aiChoice.TakeProfitMultiple)
 	}
 
-	// 🚨 新增：验证AI选择的倍数是否符合ATR%规则
-	expectedStopMultiple, expectedMinTPMultiple, expectedMaxTPMultiple := a.getExpectedMultiples(atrPct, regime)
+	// 🚨 验证AI选择的倍数是否符合规则
+	// 先验证基本范围
+	if aiChoice.StopMultiple < MinStopMultiple || aiChoice.StopMultiple > MaxStopMultiple {
+		return nil, fmt.Errorf("AI选择的止损倍数%.1f超出合理范围[%.1f-%.1f]", aiChoice.StopMultiple, MinStopMultiple, MaxStopMultiple)
+	}
+	if aiChoice.TakeProfitMultiple < MinTPMultiple || aiChoice.TakeProfitMultiple > MaxTPMultiple {
+		return nil, fmt.Errorf("AI选择的止盈倍数%.1f超出合理范围[%.1f-%.1f]", aiChoice.TakeProfitMultiple, MinTPMultiple, MaxTPMultiple)
+	}
 
-	// 允许±0.5的浮动（考虑AI的微调空间）
+	// 再验证是否符合ATR%期望
+	expectedStopMultiple, expectedMinTPMultiple, expectedMaxTPMultiple := a.getExpectedMultiples(atrPct, regime)
 	if aiChoice.StopMultiple < expectedStopMultiple-0.5 || aiChoice.StopMultiple > expectedStopMultiple+0.5 {
 		return nil, fmt.Errorf("🚨 AI作弊：ATR%%=%.2f%%时期望止损%.1fx（±0.5），但AI选择了%.1fx",
 			atrPct, expectedStopMultiple, aiChoice.StopMultiple)
 	}
-
-	// 止盈倍数应该在期望范围内
 	if aiChoice.TakeProfitMultiple < expectedMinTPMultiple || aiChoice.TakeProfitMultiple > expectedMaxTPMultiple {
 		return nil, fmt.Errorf("🚨 AI作弊：ATR%%=%.2f%%+体制%s时期望止盈%.1f-%.1fx，但AI选择了%.1fx",
 			atrPct, regime.Regime, expectedMinTPMultiple, expectedMaxTPMultiple, aiChoice.TakeProfitMultiple)
@@ -93,7 +98,7 @@ func (a *RiskAgent) Calculate(symbol string, direction string, confidenceLevel s
 
 	// Go代码计算强平价（零信任：不让AI算）
 	// 必须先计算强平价，然后才能验证止损是否合理
-	marginRate := 0.95 / float64(leverage)
+	marginRate := LiquidationMarginRate / float64(leverage)
 	var liquidationPrice float64
 	if direction == "long" {
 		liquidationPrice = currentPrice * (1.0 - marginRate)
@@ -105,31 +110,70 @@ func (a *RiskAgent) Calculate(symbol string, direction string, confidenceLevel s
 	var stopLoss, takeProfit float64
 	stopMultiple := aiChoice.StopMultiple
 	takeProfitMultiple := aiChoice.TakeProfitMultiple
+	needsAdjustment := false
 
 	if direction == "long" {
 		stopLoss = currentPrice - (atr * stopMultiple)
 		// 🔧 关键修复：确保止损不超出强平价（做多止损必须高于强平价）
 		if stopLoss <= liquidationPrice {
-			// 调整止损到强平价上方20%的安全位置
-			safeStopLoss := liquidationPrice + (currentPrice-liquidationPrice)*0.2
+			needsAdjustment = true
+			// 调整止损到强平价上方的安全位置（使用常量安全边距）
+			safeStopLoss := liquidationPrice + (currentPrice-liquidationPrice)*LiquidationSafetyRatio
 			actualStopMultiple := (currentPrice - safeStopLoss) / atr
+
+			// 🚨 验证调整后的倍数是否仍在合理范围
+			if actualStopMultiple < MinStopMultiple || actualStopMultiple > MaxStopMultiple {
+				return nil, fmt.Errorf("强平调整后止损倍数%.2fx超出[%.1f-%.1f]范围，该交易风险过高，放弃",
+					actualStopMultiple, MinStopMultiple, MaxStopMultiple)
+			}
+
 			stopLoss = safeStopLoss
 			stopMultiple = actualStopMultiple
 			// 同步调整止盈以维持R/R比
 			takeProfitMultiple = actualStopMultiple * (aiChoice.TakeProfitMultiple / aiChoice.StopMultiple)
+
+			// 🚨 验证调整后的止盈倍数是否仍在合理范围
+			if takeProfitMultiple < MinTPMultiple || takeProfitMultiple > MaxTPMultiple {
+				// 尝试使用最小止盈倍数
+				takeProfitMultiple = MinTPMultiple
+				// 重新计算R/R比
+				newRR := takeProfitMultiple / actualStopMultiple
+				if newRR < MinRiskReward*(1.0-RRFloatTolerance) {
+					return nil, fmt.Errorf("强平调整后无法维持R/R≥%.1f:1，该交易风险回报比过低，放弃", MinRiskReward)
+				}
+			}
 		}
 		takeProfit = currentPrice + (atr * takeProfitMultiple)
 	} else {
 		stopLoss = currentPrice + (atr * stopMultiple)
 		// 🔧 关键修复：确保止损不超出强平价（做空止损必须低于强平价）
 		if stopLoss >= liquidationPrice {
-			// 调整止损到强平价下方20%的安全位置
-			safeStopLoss := liquidationPrice - (liquidationPrice-currentPrice)*0.2
+			needsAdjustment = true
+			// 调整止损到强平价下方的安全位置
+			safeStopLoss := liquidationPrice - (liquidationPrice-currentPrice)*LiquidationSafetyRatio
 			actualStopMultiple := (safeStopLoss - currentPrice) / atr
+
+			// 🚨 验证调整后的倍数是否仍在合理范围
+			if actualStopMultiple < MinStopMultiple || actualStopMultiple > MaxStopMultiple {
+				return nil, fmt.Errorf("强平调整后止损倍数%.2fx超出[%.1f-%.1f]范围，该交易风险过高，放弃",
+					actualStopMultiple, MinStopMultiple, MaxStopMultiple)
+			}
+
 			stopLoss = safeStopLoss
 			stopMultiple = actualStopMultiple
 			// 同步调整止盈以维持R/R比
 			takeProfitMultiple = actualStopMultiple * (aiChoice.TakeProfitMultiple / aiChoice.StopMultiple)
+
+			// 🚨 验证调整后的止盈倍数是否仍在合理范围
+			if takeProfitMultiple < MinTPMultiple || takeProfitMultiple > MaxTPMultiple {
+				// 尝试使用最小止盈倍数
+				takeProfitMultiple = MinTPMultiple
+				// 重新计算R/R比
+				newRR := takeProfitMultiple / actualStopMultiple
+				if newRR < MinRiskReward*(1.0-RRFloatTolerance) {
+					return nil, fmt.Errorf("强平调整后无法维持R/R≥%.1f:1，该交易风险回报比过低，放弃", MinRiskReward)
+				}
+			}
 		}
 		takeProfit = currentPrice - (atr * takeProfitMultiple)
 	}
@@ -145,24 +189,29 @@ func (a *RiskAgent) Calculate(symbol string, direction string, confidenceLevel s
 	}
 	riskReward := rewardPercent / riskPercent
 
-	// 🚨 新增：验证R/R比的合理性
+	// 🚨 验证R/R比的合理性
 	// 理论R/R比 = 实际止盈倍数 / 实际止损倍数（可能已被强平价调整）
 	theoreticalRR := takeProfitMultiple / stopMultiple
-	// 实际R/R比应该与理论R/R比接近（允许5%的浮点误差，因为可能有强平价调整）
+	// 实际R/R比应该与理论R/R比接近
+	// 使用不同的容差：强平调整前用严格容差，调整后用宽松容差
+	tolerance := RRStrictTolerance
+	if needsAdjustment {
+		tolerance = RRFloatTolerance
+	}
 	rrDifference := riskReward - theoreticalRR
-	if rrDifference < -0.05*theoreticalRR || rrDifference > 0.05*theoreticalRR {
+	if rrDifference < -tolerance*theoreticalRR || rrDifference > tolerance*theoreticalRR {
 		return nil, fmt.Errorf("🚨 R/R计算异常：理论R/R=%.2f:1(%.1fx/%.1fx)，但实际计算=%.2f:1，差异=%.3f",
 			theoreticalRR, takeProfitMultiple, stopMultiple, riskReward, rrDifference)
 	}
 
-	// 🚨 硬约束：R/R比必须≥1.8（略微放宽，因为强平价调整后可能达不到2.0）
-	if riskReward < 1.75 { // 允许0.05的浮点误差
-		return nil, fmt.Errorf("🚨 风险回报比过低：R/R=%.2f:1 < 1.8:1要求（止损%.1fx, 止盈%.1fx）",
-			riskReward, stopMultiple, takeProfitMultiple)
+	// 🚨 硬约束：R/R比必须≥MinRiskReward（使用统一常量）
+	if riskReward < MinRiskReward*(1.0-RRFloatTolerance) {
+		return nil, fmt.Errorf("🚨 风险回报比过低：R/R=%.2f:1 < %.1f:1要求（止损%.1fx, 止盈%.1fx）",
+			riskReward, MinRiskReward, stopMultiple, takeProfitMultiple)
 	}
 
-	// Go代码计算仓位大小（零信任：不让AI算）
-	positionSize := a.calculatePositionSize(symbol, confidenceLevel, accountEquity)
+	// Go代码计算仓位大小（零信任：基于风险预算反推）
+	positionSize := a.calculatePositionSize(symbol, confidenceLevel, currentPrice, stopLoss, leverage, accountEquity, availableBalance)
 
 	// 构建reasoning（包含Go代码计算的所有数值，以及是否进行了强平价调整）
 	reasoningPrefix := "Go计算"
@@ -287,30 +336,62 @@ func (a *RiskAgent) calculateLeverage(symbol string, atrPct float64) int {
 	return leverage
 }
 
-// calculatePositionSize Go代码计算仓位大小（零信任 + 动态调整）
-func (a *RiskAgent) calculatePositionSize(symbol string, confidenceLevel string, accountEquity float64) float64 {
-	// 基础倍数
-	var baseMultiplier float64
-	if symbol == "BTCUSDT" || symbol == "ETHUSDT" {
-		baseMultiplier = 8.0 // BTC/ETH: 5-10倍净值
+// calculatePositionSize Go代码计算仓位大小（零信任 + 基于风险预算）
+func (a *RiskAgent) calculatePositionSize(symbol string, confidenceLevel string, currentPrice, stopLoss float64, leverage int, accountEquity, availableBalance float64) float64 {
+	// 🎯 核心改进：基于风险预算计算仓位，而非简单倍数
+	// 每笔交易风险预算 = 账户净值 × RiskBudgetPerTrade（通常1%）
+	riskBudget := accountEquity * RiskBudgetPerTrade
+
+	// 计算价格变动百分比（入场价到止损价）
+	var priceMovePct float64
+	if currentPrice > stopLoss {
+		priceMovePct = (currentPrice - stopLoss) / currentPrice
 	} else {
-		baseMultiplier = 1.0 // 山寨币: 0.8-1.5倍净值
+		priceMovePct = (stopLoss - currentPrice) / currentPrice
 	}
 
-	// 根据信心等级调整倍数
-	var confidenceAdjustment float64
+	if priceMovePct <= 0 || priceMovePct > 0.5 { // 防御性：止损距离不能超过50%
+		return 0
+	}
+
+	// 理想名义规模 = 风险预算 / 价格变动百分比
+	// 逻辑：如果止损触发，损失 = 名义规模 × 价格变动% = 风险预算
+	idealNotional := riskBudget / priceMovePct
+
+	// 根据信心等级调整仓位倍数
+	var confidenceMultiplier float64
 	switch confidenceLevel {
 	case "high":
-		confidenceAdjustment = 1.5 // 高信心：150%仓位
+		confidenceMultiplier = ConfidenceHighMultiplier // 1.2x
 	case "medium":
-		confidenceAdjustment = 1.0 // 中等信心：100%仓位（默认）
+		confidenceMultiplier = ConfidenceMediumMultiplier // 1.0x
 	case "low":
-		confidenceAdjustment = 0.8 // 低信心：80%仓位
+		confidenceMultiplier = ConfidenceLowMultiplier // 0.8x
 	default:
-		confidenceAdjustment = 1.0 // 未知等级：使用默认
+		confidenceMultiplier = ConfidenceMediumMultiplier
+	}
+	idealNotional *= confidenceMultiplier
+
+	// 保证金约束：名义规模/杠杆 = 所需保证金，不能超过可用保证金的95%
+	neededMargin := idealNotional / float64(leverage)
+	maxNotionalByMargin := (availableBalance * MarginUsageLimit) * float64(leverage)
+
+	// 🔒 硬约束：取理想规模与保证金约束的最小值
+	finalNotional := idealNotional
+	if neededMargin > availableBalance*MarginUsageLimit {
+		// 保证金不足，反推最大可行名义规模
+		finalNotional = (availableBalance * MarginUsageLimit) * float64(leverage)
+	}
+	if maxNotionalByMargin < finalNotional {
+		finalNotional = maxNotionalByMargin
 	}
 
-	return accountEquity * baseMultiplier * confidenceAdjustment
+	// 防御性：确保不为负
+	if finalNotional < 0 {
+		finalNotional = 0
+	}
+
+	return finalNotional
 }
 
 // validateResult Go代码验证（双重保险）
@@ -341,13 +422,13 @@ func (a *RiskAgent) validateResult(result *RiskParameters, symbol string, direct
 		}
 	}
 
-	// 验证R/R比
+	// 验证R/R比（使用统一常量）
 	if result.RiskPercent <= 0 {
 		return fmt.Errorf("风险百分比异常: %.2f%%", result.RiskPercent)
 	}
 	actualRR := result.RewardPercent / result.RiskPercent
-	if actualRR < 1.90 { // 允许0.1的浮点误差
-		return fmt.Errorf("风险回报比%.2f:1低于2.0:1要求", actualRR)
+	if actualRR < MinRiskReward*(1.0-RRFloatTolerance) {
+		return fmt.Errorf("风险回报比%.2f:1低于%.1f:1要求", actualRR, MinRiskReward)
 	}
 
 	// 验证强平价
@@ -366,22 +447,23 @@ func (a *RiskAgent) validateResult(result *RiskParameters, symbol string, direct
 
 // getExpectedMultiples 根据ATR%和体制计算期望的止损止盈倍数
 // 返回：(止损倍数, 最小止盈倍数, 最大止盈倍数)
+// 使用统一的ATR阈值常量
 func (a *RiskAgent) getExpectedMultiples(atrPct float64, regime *RegimeResult) (float64, float64, float64) {
 	var stopMultiple, minTPMultiple, maxTPMultiple float64
 
-	// 根据ATR%确定基础倍数
-	if atrPct < 2.0 {
-		// 低波动
+	// 根据ATR%确定基础倍数（使用统一常量）
+	if atrPct < ATRPctLow {
+		// 低波动 (<2%)
 		stopMultiple = 4.0
 		minTPMultiple = 8.0
 		maxTPMultiple = 8.0
-	} else if atrPct < 4.0 {
-		// 中波动
+	} else if atrPct < ATRPctMid {
+		// 中波动 (2-4%)
 		stopMultiple = 5.0
 		minTPMultiple = 10.0
 		maxTPMultiple = 10.0
 	} else {
-		// 高波动
+		// 高波动 (>=4%)
 		stopMultiple = 6.0
 		minTPMultiple = 12.0
 		maxTPMultiple = 12.0
@@ -390,10 +472,10 @@ func (a *RiskAgent) getExpectedMultiples(atrPct float64, regime *RegimeResult) (
 	// 根据体制调整止盈倍数
 	if regime.Regime == "A1" || regime.Regime == "A2" {
 		// 趋势行情：提高止盈倍数
-		if atrPct < 2.0 {
+		if atrPct < ATRPctLow {
 			minTPMultiple = 12.0
 			maxTPMultiple = 15.0
-		} else if atrPct < 4.0 {
+		} else if atrPct < ATRPctMid {
 			minTPMultiple = 12.0
 			maxTPMultiple = 16.0
 		} else {
