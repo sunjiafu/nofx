@@ -9,6 +9,8 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -75,8 +77,8 @@ type AutoTrader struct {
 	config                AutoTraderConfig
 	trader                Trader // 使用Trader接口（支持多平台）
 	mcpClient             *mcp.Client
-	decisionLogger        *logger.DecisionLogger  // 决策日志记录器
-	constraints           *TradingConstraints      // 交易硬约束管理器
+	decisionLogger        *logger.DecisionLogger // 决策日志记录器
+	constraints           *TradingConstraints    // 交易硬约束管理器
 	initialBalance        float64
 	dailyPnL              float64
 	lastResetTime         time.Time
@@ -171,6 +173,9 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	constraints := NewTradingConstraints()
 	log.Printf("🛡️ [%s] 硬约束已启用: 冷却期20分钟 | 日上限8次 | 时上限2次 | 最短持仓15分钟", config.Name)
 
+	// 🔧 从历史日志恢复周期编号（防止重启后周期编号混乱）
+	lastCycleNumber := recoverLastCycleNumber(logDir)
+
 	return &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
@@ -184,7 +189,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		initialBalance:        config.InitialBalance,
 		lastResetTime:         time.Now(),
 		startTime:             time.Now(),
-		callCount:             0,
+		callCount:             lastCycleNumber, // 从历史日志恢复
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
 	}, nil
@@ -228,12 +233,13 @@ func (at *AutoTrader) Stop() {
 func (at *AutoTrader) runCycle() error {
 	at.callCount++
 
-	log.Printf("\n" + strings.Repeat("=", 70))
+	log.Print("\n" + strings.Repeat("=", 70))
 	log.Printf("⏰ %s - AI决策周期 #%d", time.Now().Format("2006-01-02 15:04:05"), at.callCount)
-	log.Printf(strings.Repeat("=", 70))
+	log.Print(strings.Repeat("=", 70))
 
 	// 创建决策记录
 	record := &logger.DecisionRecord{
+		CycleNumber:  at.callCount, // 🔧 修复：使用callCount作为周期号，确保同一周期的多次日志记录使用相同的周期号
 		ExecutionLog: []string{},
 		Success:      true,
 	}
@@ -359,7 +365,7 @@ func (at *AutoTrader) runCycle() error {
 			log.Println("💭 AI思维链分析（错误情况）:")
 			log.Println(strings.Repeat("-", 70))
 			log.Println(decision.CoTTrace)
-			log.Printf(strings.Repeat("-", 70) + "\n")
+			log.Print(strings.Repeat("-", 70) + "\n")
 		}
 
 		at.decisionLogger.LogDecision(record)
@@ -367,11 +373,11 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	// 5. 打印AI思维链
-	log.Printf("\n" + strings.Repeat("-", 70))
+	log.Print("\n" + strings.Repeat("-", 70))
 	log.Println("💭 AI思维链分析:")
 	log.Println(strings.Repeat("-", 70))
 	log.Println(decision.CoTTrace)
-	log.Printf(strings.Repeat("-", 70) + "\n")
+	log.Print(strings.Repeat("-", 70) + "\n")
 
 	// 6. 打印AI决策
 	log.Printf("📋 AI决策列表 (%d 个):\n", len(decision.Decisions))
@@ -1159,3 +1165,54 @@ func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision 
 
 	return sorted
 }
+
+// recoverLastCycleNumber 从历史日志恢复最后的周期编号
+// 读取日志目录中最新的决策日志文件，获取最大的 cycle_number
+// 返回：最大周期编号（如果没有历史日志则返回0）
+func recoverLastCycleNumber(logDir string) int {
+	// 检查日志目录是否存在
+	if _, err := os.Stat(logDir); os.IsNotExist(err) {
+		return 0
+	}
+
+	// 读取日志目录中的所有文件
+	files, err := os.ReadDir(logDir)
+	if err != nil {
+		log.Printf("⚠️  读取日志目录失败: %v，从周期 1 开始", err)
+		return 0
+	}
+
+	// 遍历所有JSON文件，找到最大的 cycle_number
+	maxCycleNumber := 0
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+
+		// 读取JSON文件
+		filePath := filepath.Join(logDir, file.Name())
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+
+		// 解析JSON，提取 cycle_number
+		var record struct {
+			CycleNumber int `json:"cycle_number"`
+		}
+		if err := json.Unmarshal(data, &record); err != nil {
+			continue
+		}
+
+		if record.CycleNumber > maxCycleNumber {
+			maxCycleNumber = record.CycleNumber
+		}
+	}
+
+	if maxCycleNumber > 0 {
+		log.Printf("📊 从历史日志恢复周期编号，继续从周期 %d 开始", maxCycleNumber+1)
+	}
+
+	return maxCycleNumber
+}
+
