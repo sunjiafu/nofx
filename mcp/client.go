@@ -36,7 +36,7 @@ func New() *Client {
 		Provider: ProviderDeepSeek,
 		BaseURL:  "https://api.deepseek.com/v1",
 		Model:    "deepseek-chat",
-		Timeout:  120 * time.Second, // 增加到120秒，因为AI需要分析大量数据
+		Timeout:  240 * time.Second, // 增加到240秒，DeepSeek在高峰期可能响应较慢
 	}
 	return &defaultClient
 }
@@ -73,7 +73,7 @@ func (cfg *Client) SetCustomAPI(apiURL, apiKey, modelName string) {
 	}
 
 	cfg.Model = modelName
-	cfg.Timeout = 120 * time.Second
+	cfg.Timeout = 240 * time.Second
 }
 
 // SetClient 设置完整的AI配置（高级用户）
@@ -126,6 +126,9 @@ func (cfg *Client) CallWithMessages(systemPrompt, userPrompt string) (string, er
 
 // callOnce 单次调用AI API（内部使用）
 func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
+	startTime := time.Now()
+	fmt.Printf("📡 调用AI API (%s)...\n", cfg.Provider)
+
 	// 构建 messages 数组
 	messages := []map[string]string{}
 
@@ -189,9 +192,11 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 
 	// 发送请求
 	client := &http.Client{Timeout: cfg.Timeout}
+	fmt.Printf("⏳ 等待AI响应 (超时时间: %v)...\n", cfg.Timeout)
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("发送请求失败: %w", err)
+		elapsed := time.Since(startTime)
+		return "", fmt.Errorf("发送请求失败 (耗时%.1fs): %w", elapsed.Seconds(), err)
 	}
 	defer resp.Body.Close()
 
@@ -222,6 +227,8 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 		return "", fmt.Errorf("API返回空响应")
 	}
 
+	elapsed := time.Since(startTime)
+	fmt.Printf("✅ AI响应成功 (耗时%.1fs)\n", elapsed.Seconds())
 	return result.Choices[0].Message.Content, nil
 }
 
