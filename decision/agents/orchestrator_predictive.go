@@ -222,11 +222,13 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 		for _, coin := range ctx.CandidateCoins {
 			// 跳过已持仓的币种
 			if positionSymbols[coin.Symbol] {
+				cotBuilder.WriteString(fmt.Sprintf("**%s**: 已持仓，跳过分析\n\n", coin.Symbol))
 				continue
 			}
 
 			marketData, hasData := ctx.MarketDataMap[coin.Symbol]
 			if !hasData {
+				cotBuilder.WriteString(fmt.Sprintf("**%s**: 缺少市场数据，跳过分析\n\n", coin.Symbol))
 				continue
 			}
 
@@ -630,9 +632,16 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 		positionSize = availableBalance * 0.9
 	}
 
-	// 最小仓位检查（Binance要求名义价值≥100 USDT）
+	// 最小仓位保护（Binance要求名义价值≥100 USDT）
 	if positionSize < 100 {
-		return 0, 0, 0, 0, fmt.Errorf("计算的仓位太小: %.2f USDT (Binance要求≥100)", positionSize)
+		// 如果凯利计算太小，但账户有足够余额，强制使用100 USDT最小仓位
+		if totalEquity >= 100 && availableBalance >= 50 {
+			log.Printf("⚠️  [%s] 凯利仓位%.2f USDT过小，使用最小仓位100 USDT", prediction.Symbol, positionSize)
+			positionSize = 100
+		} else {
+			return 0, 0, 0, 0, fmt.Errorf("账户资金不足: 总资产%.2f, 可用%.2f (需要≥100 USDT开仓)",
+				totalEquity, availableBalance)
+		}
 	}
 
 	// 计算杠杆（基于波动率）
