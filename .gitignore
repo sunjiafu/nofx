@@ -33,6 +33,10 @@ config.json.*
 decision_logs/
 coin_pool_cache/
 nofx_test
+prediction_logs/
+web.pid
+nofx.pid
+trader_memory/mock_qwen.json
 
 # Node.js
 web/node_modules/
