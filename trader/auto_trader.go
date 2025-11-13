@@ -658,13 +658,61 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	// 检测已消失的持仓（例如止损/强平生效）
 	for key, last := range at.lastPositionSnapshot {
 		if !currentPositionKeys[key] {
+			isManualClose := false
 			if ts, ok := at.manualCloseTracker[key]; ok && time.Since(ts) < 2*time.Minute {
 				log.Printf("📤 持仓已主动平仓: %s %s | 入场价 %.4f | 上次价格 %.4f | 未实现盈亏 %.2f%%",
 					last.Symbol, strings.ToUpper(last.Side), last.EntryPrice, last.MarkPrice, last.UnrealizedPnLPct)
 				delete(at.manualCloseTracker, key)
+				isManualClose = true
 			} else {
 				log.Printf("🚨 检测到持仓消失，可能为止损/强平触发: %s %s | 入场价 %.4f | 上次价格 %.4f | 未实现盈亏 %.2f%%",
 					last.Symbol, strings.ToUpper(last.Side), last.EntryPrice, last.MarkPrice, last.UnrealizedPnLPct)
+			}
+
+			// 🧠 记录止损/止盈到AI记忆
+			if !isManualClose {
+				// 构建交易记录
+				holdMinutes := 0
+				if !last.OpenTime.IsZero() {
+					holdMinutes = int(time.Since(last.OpenTime).Minutes())
+				}
+
+				result := "break_even"
+				if last.UnrealizedPnLPct > 0.1 {
+					result = "win"
+				} else if last.UnrealizedPnLPct < -0.1 {
+					result = "loss"
+				}
+
+				// 推断止损还是止盈
+				triggerType := "止损"
+				if last.UnrealizedPnLPct > 0 {
+					triggerType = "止盈"
+				}
+
+				tradeEntry := memory.TradeEntry{
+					Cycle:       at.callCount,
+					Timestamp:   time.Now(),
+					Action:      "close",
+					Symbol:      last.Symbol,
+					Side:        last.Side,
+					Signals:     []string{triggerType + "自动触发"},
+					Reasoning:   fmt.Sprintf("%s自动触发（持仓消失，未经主动平仓决策）", triggerType),
+					EntryPrice:  last.EntryPrice,
+					ExitPrice:   last.MarkPrice,
+					PositionPct: (last.MarginUsed / totalEquity) * 100,
+					Leverage:    last.Leverage,
+					HoldMinutes: holdMinutes,
+					ReturnPct:   last.UnrealizedPnLPct,
+					Result:      result,
+				}
+
+				if err := at.memoryManager.AddTrade(tradeEntry); err != nil {
+					log.Printf("⚠️  记录止损/止盈到记忆失败: %v", err)
+				} else {
+					log.Printf("✅ 已记录%s到交易记忆：%s %s, 收益%.2f%%",
+						triggerType, last.Symbol, last.Side, last.UnrealizedPnLPct)
+				}
 			}
 		}
 	}
