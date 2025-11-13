@@ -618,7 +618,7 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 	// 使用全凯利 - 数学最优解，最大化长期增长率
 	conservativeKelly := kellyFraction * 1.0
 
-	// 计算仓位大小
+	// 计算仓位大小（名义价值）
 	positionSize = totalEquity * conservativeKelly
 
 	// 硬约束：单币最多60%总资金
@@ -627,24 +627,7 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 		positionSize = maxPositionSize
 	}
 
-	// 硬约束：不超过可用余额
-	if positionSize > availableBalance*0.9 {
-		positionSize = availableBalance * 0.9
-	}
-
-	// 最小仓位保护（Binance要求名义价值≥100 USDT）
-	if positionSize < 100 {
-		// 如果凯利计算太小，但账户有足够余额，强制使用100 USDT最小仓位
-		if totalEquity >= 100 && availableBalance >= 50 {
-			log.Printf("⚠️  [%s] 凯利仓位%.2f USDT过小，使用最小仓位100 USDT", prediction.Symbol, positionSize)
-			positionSize = 100
-		} else {
-			return 0, 0, 0, 0, fmt.Errorf("账户资金不足: 总资产%.2f, 可用%.2f (需要≥100 USDT开仓)",
-				totalEquity, availableBalance)
-		}
-	}
-
-	// 计算杠杆（基于波动率）
+	// 🔧 计算杠杆（需要先计算杠杆，才能检查保证金）
 	isBTCETH := (prediction.Symbol == "BTCUSDT" || prediction.Symbol == "ETHUSDT")
 	baseLeverage := o.altcoinLeverage
 	if isBTCETH {
@@ -665,6 +648,30 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 
 	if leverage < 1 {
 		leverage = 1
+	}
+
+	// 最小仓位保护（Binance要求名义价值≥100 USDT）
+	if positionSize < 100 {
+		// 强制使用100 USDT最小名义价值
+		log.Printf("⚠️  [%s] 凯利仓位%.2f USDT过小，使用最小仓位100 USDT", prediction.Symbol, positionSize)
+		positionSize = 100
+	}
+
+	// 🔧 检查保证金是否足够（名义价值/杠杆 = 保证金）
+	requiredMargin := positionSize / float64(leverage)
+	if requiredMargin > availableBalance*0.9 {
+		// 保证金不足，降低仓位
+		oldPositionSize := positionSize
+		positionSize = availableBalance * 0.9 * float64(leverage)
+		log.Printf("⚠️  [%s] 保证金不足，降低仓位: %.2f → %.2f USDT (保证金%.2f → %.2f)",
+			prediction.Symbol, oldPositionSize, positionSize,
+			oldPositionSize/float64(leverage), positionSize/float64(leverage))
+
+		// 再次检查是否还满足最小100 USDT
+		if positionSize < 100 {
+			return 0, 0, 0, 0, fmt.Errorf("账户资金不足: 可用%.2f USDT, %dx杠杆最多开%.2f USDT (需≥100)",
+				availableBalance, leverage, availableBalance*float64(leverage))
+		}
 	}
 
 	// 计算止损止盈（基于AI预测的最好/最坏情况）
@@ -709,6 +716,13 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 			marginRate = LiquidationMarginRate / float64(leverage)
 			liquidationPrice = currentPrice * (1 + marginRate)
 		}
+	}
+
+	// 🔧 最终保证金检查（杠杆可能在止损验证时被调整）
+	finalMargin := positionSize / float64(leverage)
+	if finalMargin > availableBalance*0.9 {
+		return 0, 0, 0, 0, fmt.Errorf("调整杠杆后保证金不足: 需要%.2f USDT, 可用%.2f USDT (杠杆%dx)",
+			finalMargin, availableBalance, leverage)
 	}
 
 	return positionSize, leverage, stopLoss, takeProfit, nil
