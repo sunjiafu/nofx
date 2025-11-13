@@ -294,6 +294,11 @@ nano config.json  # or use any editor
 chmod +x start.sh
 ./start.sh start --build
 
+> **Go proxy for Docker builds**  
+> `start.sh` / `deploy/deploy-server.sh` will ask which Go module proxy to use and write it into `.env` as `GOPROXY_URL`.  
+> • 🇭🇰/Global servers: keep the default `https://proxy.golang.org,direct` for fastest access.  
+> • 🇨🇳 Mainland servers: choose `https://goproxy.cn,direct` (or edit `.env` later) to avoid下载超时.
+
 > #### Docker Compose Version Notes
 >
 > **This project uses Docker Compose V2 syntax (with spaces)**

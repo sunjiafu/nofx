@@ -202,17 +202,21 @@ services:
 ```bash
 # .env
 TZ=Asia/Shanghai
-BACKEND_PORT=8080
-FRONTEND_PORT=3000
+NOFX_BACKEND_PORT=8080
+NOFX_FRONTEND_PORT=3000
+# Go module proxy used during Docker builds
+GOPROXY_URL=https://proxy.golang.org,direct  # 中国大陆可换成 https://goproxy.cn,direct
 ```
 
 然后在 `docker-compose.yml` 中使用：
 
 ```yaml
 services:
-  backend:
+  nofx:
     ports:
-      - "${BACKEND_PORT}:8080"
+      - "${NOFX_BACKEND_PORT}:8080"
+
+`docker-compose.yml` 会将 `GOPROXY_URL` 透传给 `docker/Dockerfile.backend` 的 `GOPROXY_URL` Build ARG，从而控制 Go 依赖下载源。使用部署脚本时会自动询问该参数，也可以手动编辑 `.env` 后重新执行 `docker compose build`.
 ```
 
 ## 📁 数据持久化

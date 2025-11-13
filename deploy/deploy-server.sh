@@ -74,14 +74,26 @@ if [ "$deploy_choice" == "1" ]; then
     # 配置环境变量
     echo -e "${GREEN}[4/6]${NC} 配置环境变量..."
     if [ ! -f .env ]; then
-        cat > .env << 'EOF'
+        echo ""
+        echo "  请选择Go模块代理来源（Docker构建会使用该地址下载依赖）"
+        echo "    1) 国际/香港服务器（默认）: https://proxy.golang.org,direct"
+        echo "    2) 中国大陆服务器: https://goproxy.cn,direct"
+        read -p "  请选择 [1-2，回车默认1]: " go_proxy_choice
+        if [ "$go_proxy_choice" == "2" ]; then
+            GO_PROXY_URL="https://goproxy.cn,direct"
+        else
+            GO_PROXY_URL="https://proxy.golang.org,direct"
+        fi
+
+        cat > .env << EOF
 NOFX_BACKEND_PORT=8080
 NOFX_FRONTEND_PORT=3000
 NOFX_TIMEZONE=Asia/Shanghai
+GOPROXY_URL=$GO_PROXY_URL
 EOF
-        echo -e "  ${GREEN}✓${NC} 已创建 .env 文件"
+        echo -e "  ${GREEN}✓${NC} 已创建 .env 文件（GOPROXY_URL=$GO_PROXY_URL）"
     else
-        echo -e "  ${YELLOW}⚠${NC}  .env 已存在，跳过"
+        echo -e "  ${YELLOW}⚠${NC}  .env 已存在，如需修改Go代理请编辑 GOPROXY_URL"
     fi
 
     # 配置config.json

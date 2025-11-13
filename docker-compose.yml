@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: ./docker/Dockerfile.backend
+      args:
+        GOPROXY_URL: ${GOPROXY_URL:-https://proxy.golang.org,direct}
     container_name: nofx-trading
     restart: unless-stopped
     ports:
