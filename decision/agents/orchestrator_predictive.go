@@ -330,6 +330,14 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 					continue
 				}
 
+				// 🆕 入场时机验证（防止追涨杀跌）
+				timingErr := validateEntryTiming(vp.prediction.Direction, marketData)
+				if timingErr != nil {
+					cotBuilder.WriteString(fmt.Sprintf("**%s**: %v\n\n", vp.symbol, timingErr))
+					log.Printf("⏸️  [%s] 入场时机不佳，跳过开仓: %v", vp.symbol, timingErr)
+					continue
+				}
+
 				requiredMargin := positionSize / float64(leverage)
 				if requiredMargin > remainingBalance {
 					cotBuilder.WriteString(fmt.Sprintf("**%s**: 剩余资金不足（需要%.2f, 剩余%.2f）\n\n",
@@ -786,6 +794,92 @@ func (o *DecisionOrchestrator) validateRiskParameters(
 	// ✅ 所有检查通过
 	log.Printf("✅ [%s] 风控验证通过: 止损%.1fx ATR | 止盈%.1fx ATR | R/R=%.2f:1 | 强平价安全距离OK",
 		symbol, stopMultiple, tpMultiple, riskReward)
+
+	return nil
+}
+
+// ==================== 入场时机验证 ====================
+
+// validateEntryTiming 验证入场时机，防止追涨杀跌
+// 这是硬约束层，不依赖AI prompt，在决策执行前强制检查
+func validateEntryTiming(direction string, md *market.Data) error {
+	if md == nil {
+		return fmt.Errorf("市场数据为空")
+	}
+
+	symbol := md.Symbol
+	price := md.CurrentPrice
+	rsi7 := md.CurrentRSI7
+	rsi14 := md.CurrentRSI14
+	change15m := md.PriceChange15m
+	change1h := md.PriceChange1h
+	ema20 := md.CurrentEMA20
+
+	// 计算价格偏离EMA20的幅度
+	var deviationFromEMA float64
+	if ema20 > 0 {
+		deviationFromEMA = (price - ema20) / ema20 * 100
+	}
+
+	// ============ 做多入场时机检查 ============
+	if direction == "long" {
+		// 1. 禁止在严重超买区做多（追高风险极大）
+		if rsi7 > 75 {
+			return fmt.Errorf("[%s] 🚫 禁止追高：RSI7=%.1f >75（严重超买，等待回调）", symbol, rsi7)
+		}
+		if rsi14 > 70 {
+			return fmt.Errorf("[%s] 🚫 禁止追高：RSI14=%.1f >70（超买区域，等待回调）", symbol, rsi14)
+		}
+
+		// 2. 禁止在短期暴涨后做多
+		if change15m > 3.0 {
+			return fmt.Errorf("[%s] 🚫 禁止追高：15分钟涨幅%.2f%% >3%%（短期暴涨，等待回调）", symbol, change15m)
+		}
+		if change1h > 5.0 {
+			return fmt.Errorf("[%s] 🚫 禁止追高：1小时涨幅%.2f%% >5%%（涨幅过大，等待回调）", symbol, change1h)
+		}
+
+		// 3. 禁止在价格远高于EMA20时做多（偏离均线过远）
+		if deviationFromEMA > 4.0 {
+			return fmt.Errorf("[%s] 🚫 禁止追高：价格偏离EMA20 +%.2f%% >4%%（偏离过远，等待回踩）", symbol, deviationFromEMA)
+		}
+
+		// ✅ 理想做多区域：RSI 30-60，小幅回调或横盘后启动
+		if rsi7 >= 30 && rsi7 <= 60 && change15m < 2.0 && deviationFromEMA < 3.0 {
+			log.Printf("✅ [%s] 入场时机良好：RSI7=%.1f, 15m涨幅%.2f%%, 偏离EMA20=%.2f%%",
+				symbol, rsi7, change15m, deviationFromEMA)
+		}
+	}
+
+	// ============ 做空入场时机检查 ============
+	if direction == "short" {
+		// 1. 禁止在严重超卖区做空（杀跌风险极大）
+		if rsi7 < 25 {
+			return fmt.Errorf("[%s] 🚫 禁止杀跌：RSI7=%.1f <25（严重超卖，可能反弹）", symbol, rsi7)
+		}
+		if rsi14 < 30 {
+			return fmt.Errorf("[%s] 🚫 禁止杀跌：RSI14=%.1f <30（超卖区域，可能反弹）", symbol, rsi14)
+		}
+
+		// 2. 禁止在短期暴跌后做空
+		if change15m < -3.0 {
+			return fmt.Errorf("[%s] 🚫 禁止杀跌：15分钟跌幅%.2f%% <-3%%（短期暴跌，可能反弹）", symbol, change15m)
+		}
+		if change1h < -5.0 {
+			return fmt.Errorf("[%s] 🚫 禁止杀跌：1小时跌幅%.2f%% <-5%%（跌幅过大，可能反弹）", symbol, change1h)
+		}
+
+		// 3. 禁止在价格远低于EMA20时做空（偏离均线过远）
+		if deviationFromEMA < -4.0 {
+			return fmt.Errorf("[%s] 🚫 禁止杀跌：价格偏离EMA20 %.2f%% <-4%%（偏离过远，可能反抽）", symbol, deviationFromEMA)
+		}
+
+		// ✅ 理想做空区域：RSI 40-70，小幅反弹或横盘后下跌
+		if rsi7 >= 40 && rsi7 <= 70 && change15m > -2.0 && deviationFromEMA > -3.0 {
+			log.Printf("✅ [%s] 入场时机良好：RSI7=%.1f, 15m跌幅%.2f%%, 偏离EMA20=%.2f%%",
+				symbol, rsi7, change15m, deviationFromEMA)
+		}
+	}
 
 	return nil
 }
