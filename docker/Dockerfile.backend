@@ -9,6 +9,7 @@
 ARG GO_VERSION=1.25-alpine
 ARG ALPINE_VERSION=latest
 ARG TA_LIB_VERSION=0.4.0
+ARG GOPROXY_URL=https://proxy.golang.org,direct
 
 # ──────────────────────────────────────────────────────────────
 # TA-Lib Build Stage (shared across builds)
@@ -37,13 +38,14 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-${TA_LIB_VERSION}-src.
 # Backend Build Stage (Go Application)
 # ──────────────────────────────────────────────────────────────
 FROM golang:${GO_VERSION} AS backend-builder
+ARG GOPROXY_URL
 
 RUN apk update && apk add --no-cache git make gcc g++ musl-dev
 
 COPY --from=ta-lib-builder /usr/local /usr/local
 
 # Set Go proxy for faster dependency download
-ENV GOPROXY=https://goproxy.cn,direct
+ENV GOPROXY=$GOPROXY_URL
 
 WORKDIR /app
 COPY go.mod go.sum ./
