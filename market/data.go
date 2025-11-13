@@ -57,8 +57,6 @@ func calculateKlineLimit(interval string) int {
 		minutes = 3
 	case "5m":
 		minutes = 5
-	case "10m":
-		minutes = 10
 	case "15m":
 		minutes = 15
 	case "30m":
@@ -940,8 +938,6 @@ func getIntervalMinutes(interval string) int {
 		return 3
 	case "5m":
 		return 5
-	case "10m":
-		return 10
 	case "15m":
 		return 15
 	case "30m":

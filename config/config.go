@@ -44,7 +44,7 @@ type TraderConfig struct {
 
 	InitialBalance      float64 `json:"initial_balance"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
-	KlineInterval       string  `json:"kline_interval,omitempty"` // K线周期，如 "5m", "10m", "15m"，默认 "5m"
+	KlineInterval       string  `json:"kline_interval,omitempty"` // K线周期，如 "5m", "15m", "30m"，默认 "5m"
 }
 
 // LeverageConfig 杠杆配置
@@ -194,11 +194,11 @@ func (c *Config) Validate() error {
 			c.Traders[i].KlineInterval = "5m" // 默认5分钟
 		}
 		allowedIntervals := map[string]bool{
-			"1m": true, "3m": true, "5m": true, "10m": true, "15m": true,
+			"1m": true, "3m": true, "5m": true, "15m": true,
 			"30m": true, "1h": true, "2h": true, "4h": true,
 		}
 		if !allowedIntervals[c.Traders[i].KlineInterval] {
-			return fmt.Errorf("trader[%d]: kline_interval必须是 '1m', '3m', '5m', '10m', '15m', '30m', '1h', '2h' 或 '4h'", i)
+			return fmt.Errorf("trader[%d]: kline_interval必须是 '1m', '3m', '5m', '15m', '30m', '1h', '2h' 或 '4h'", i)
 		}
 	}
 
