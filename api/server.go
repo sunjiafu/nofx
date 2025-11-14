@@ -1,10 +1,14 @@
 package api
 
 import (
+	"bufio"
 	"fmt"
 	"log"
 	"net/http"
 	"nofx/manager"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -78,6 +82,10 @@ func (s *Server) setupRoutes() {
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
 		api.GET("/memory", s.handleMemory) // 🧠 AI记忆系统
+
+		// 📋 日志查看接口（用于远程诊断）
+		api.GET("/logs", s.handleLogs)
+		api.GET("/logs/errors", s.handleErrorLogs)
 	}
 }
 
@@ -418,6 +426,8 @@ func (s *Server) Start() error {
 	log.Printf("  • GET  /api/equity-history?trader_id=xxx - 指定trader的收益率历史数据")
 	log.Printf("  • GET  /api/performance?trader_id=xxx - 指定trader的AI学习表现分析")
 	log.Printf("  • GET  /api/memory?trader_id=xxx - 指定trader的AI记忆系统")
+	log.Printf("  • GET  /api/logs?lines=N&filter=keyword - 系统日志（远程诊断）")
+	log.Printf("  • GET  /api/logs/errors?lines=N - 错误日志（远程诊断）")
 	log.Printf("  • GET  /health               - 健康检查")
 	log.Println()
 
@@ -440,3 +450,128 @@ func (s *Server) handleMemory(c *gin.Context) {
 
 	c.JSON(http.StatusOK, memory)
 }
+
+// handleLogs 📋 获取系统日志（用于远程诊断）
+// 支持查询参数：
+//   - lines: 返回的行数，默认200，最大1000
+//   - filter: 关键词过滤（可选）
+func (s *Server) handleLogs(c *gin.Context) {
+	// 解析参数
+	linesStr := c.DefaultQuery("lines", "200")
+	filter := c.Query("filter")
+
+	lines, err := strconv.Atoi(linesStr)
+	if err != nil || lines <= 0 {
+		lines = 200
+	}
+	if lines > 1000 {
+		lines = 1000 // 限制最大1000行，避免响应过大
+	}
+
+	// 读取日志文件
+	logFile := "nofx.log"
+	content, err := readLastLines(logFile, lines, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("读取日志失败: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"file":   logFile,
+		"lines":  len(content),
+		"filter": filter,
+		"logs":   content,
+	})
+}
+
+// handleErrorLogs 📋 获取错误日志（只返回包含错误/失败的行）
+func (s *Server) handleErrorLogs(c *gin.Context) {
+	// 解析参数
+	linesStr := c.DefaultQuery("lines", "200")
+
+	lines, err := strconv.Atoi(linesStr)
+	if err != nil || lines <= 0 {
+		lines = 200
+	}
+	if lines > 1000 {
+		lines = 1000
+	}
+
+	// 读取日志并过滤错误信息
+	logFile := "nofx.log"
+	// 匹配错误关键词
+	errorKeywords := "❌|⚠️|ERROR|失败|错误|code=-|panic|fatal"
+	content, err := readLastLines(logFile, lines*5, errorKeywords) // 读取更多行再过滤
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": fmt.Sprintf("读取日志失败: %v", err),
+		})
+		return
+	}
+
+	// 只返回最近的指定行数
+	if len(content) > lines {
+		content = content[len(content)-lines:]
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"file":   logFile,
+		"lines":  len(content),
+		"filter": "errors only",
+		"logs":   content,
+	})
+}
+
+// readLastLines 读取文件的最后N行（支持关键词过滤）
+func readLastLines(filename string, maxLines int, filter string) ([]string, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var lines []string
+	scanner := bufio.NewScanner(file)
+
+	// 设置更大的buffer（避免行太长导致扫描失败）
+	const maxCapacity = 1024 * 1024 // 1MB
+	buf := make([]byte, maxCapacity)
+	scanner.Buffer(buf, maxCapacity)
+
+	// 读取所有行
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// 如果有过滤关键词，检查是否匹配
+		if filter != "" {
+			// 支持多个关键词（用|分隔）
+			keywords := strings.Split(filter, "|")
+			matched := false
+			for _, keyword := range keywords {
+				if strings.Contains(line, strings.TrimSpace(keyword)) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		lines = append(lines, line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	// 只返回最后N行
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+
+	return lines, nil
+}
+
