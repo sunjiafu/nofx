@@ -663,14 +663,23 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 		// 保证金不足，降低仓位
 		oldPositionSize := positionSize
 		positionSize = availableBalance * 0.9 * float64(leverage)
-		log.Printf("⚠️  [%s] 保证金不足，降低仓位: %.2f → %.2f USDT (保证金%.2f → %.2f)",
-			prediction.Symbol, oldPositionSize, positionSize,
-			oldPositionSize/float64(leverage), positionSize/float64(leverage))
 
-		// 再次检查是否还满足最小100 USDT
+		// ✅ 关键修复：确保降低后的仓位不低于 100 USDT
 		if positionSize < 100 {
-			return 0, 0, 0, 0, fmt.Errorf("账户资金不足: 可用%.2f USDT, %dx杠杆最多开%.2f USDT (需≥100)",
-				availableBalance, leverage, availableBalance*float64(leverage))
+			positionSize = 100
+			// 重新检查 100 USDT 仓位所需的保证金
+			requiredMargin = 100.0 / float64(leverage)
+			if requiredMargin > availableBalance {
+				return 0, 0, 0, 0, fmt.Errorf("账户资金不足: 可用%.2f USDT, %dx杠杆下最小仓位100 USDT需保证金%.2f USDT",
+					availableBalance, leverage, requiredMargin)
+			}
+			log.Printf("⚠️  [%s] 保证金不足，降低仓位至最小值: %.2f → 100 USDT (保证金%.2f → %.2f)",
+				prediction.Symbol, oldPositionSize,
+				oldPositionSize/float64(leverage), requiredMargin)
+		} else {
+			log.Printf("⚠️  [%s] 保证金不足，降低仓位: %.2f → %.2f USDT (保证金%.2f → %.2f)",
+				prediction.Symbol, oldPositionSize, positionSize,
+				oldPositionSize/float64(leverage), positionSize/float64(leverage))
 		}
 	}
 
