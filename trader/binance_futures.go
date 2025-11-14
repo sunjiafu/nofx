@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -421,6 +422,32 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 		return nil, err
 	}
 
+	// ✅ 关键修复：验证格式化后的数量是否满足100 USDT最小名义价值
+	// 格式化可能会截断精度，导致 quantity × price < 100
+	formattedQty, _ := strconv.ParseFloat(quantityStr, 64)
+	currentPrice, err := t.GetMarketPrice(symbol)
+	if err != nil {
+		return nil, fmt.Errorf("获取市场价格失败: %w", err)
+	}
+
+	notionalValue := formattedQty * currentPrice
+	if notionalValue < 100 {
+		// 向上调整数量以满足最小值要求
+		minQuantity := 100.0 / currentPrice
+		// 获取精度以便正确舍入
+		precision, _ := t.GetSymbolPrecision(symbol)
+		factor := 1.0
+		for i := 0; i < precision; i++ {
+			factor *= 10
+		}
+		// 向上舍入
+		adjustedQty := math.Ceil(minQuantity*factor) / factor
+		quantityStr, _ = t.FormatQuantity(symbol, adjustedQty)
+
+		log.Printf("  ⚠️ 调整数量以满足最小名义价值: %.8f (%.2f USDT) → %s (%.2f USDT)",
+			formattedQty, notionalValue, quantityStr, adjustedQty*currentPrice)
+	}
+
 	// 创建市价买入订单
 	order, err := t.client.NewCreateOrderService().
 		Symbol(symbol).
@@ -473,6 +500,32 @@ func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int)
 	quantityStr, err := t.FormatQuantity(symbol, quantity)
 	if err != nil {
 		return nil, err
+	}
+
+	// ✅ 关键修复：验证格式化后的数量是否满足100 USDT最小名义价值
+	// 格式化可能会截断精度，导致 quantity × price < 100
+	formattedQty, _ := strconv.ParseFloat(quantityStr, 64)
+	currentPrice, err := t.GetMarketPrice(symbol)
+	if err != nil {
+		return nil, fmt.Errorf("获取市场价格失败: %w", err)
+	}
+
+	notionalValue := formattedQty * currentPrice
+	if notionalValue < 100 {
+		// 向上调整数量以满足最小值要求
+		minQuantity := 100.0 / currentPrice
+		// 获取精度以便正确舍入
+		precision, _ := t.GetSymbolPrecision(symbol)
+		factor := 1.0
+		for i := 0; i < precision; i++ {
+			factor *= 10
+		}
+		// 向上舍入
+		adjustedQty := math.Ceil(minQuantity*factor) / factor
+		quantityStr, _ = t.FormatQuantity(symbol, adjustedQty)
+
+		log.Printf("  ⚠️ 调整数量以满足最小名义价值: %.8f (%.2f USDT) → %s (%.2f USDT)",
+			formattedQty, notionalValue, quantityStr, adjustedQty*currentPrice)
 	}
 
 	// 创建市价卖出订单
