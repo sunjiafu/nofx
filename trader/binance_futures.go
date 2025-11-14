@@ -159,9 +159,10 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 			priceMovePct = ((entryPrice - markPrice) / entryPrice) * 100
 		}
 
-		// 【优化1】提高触发阈值：只有价格变动≥1%时才触发动态止损
-		// （注意：这里用的是实际价格变动，不是杠杆盈利率）
-		if priceMovePct < 1.0 {
+		// 【优化1】提高触发阈值：价格变动≥5%时才触发移动止损（避免小波动被扫）
+		// 说明：仓位保证金~10 USDT，1%波动只有0.1 USDT，太容易被扫
+		//       提高到5%后，波动0.5 USDT，更安全
+		if priceMovePct < 5.0 {
 			continue
 		}
 
@@ -176,49 +177,40 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 			continue
 		}
 
-		// 🔧 修复：根据实际价格变动（不是杠杆盈利）决定允许的回撤百分比
-		// 原理：价格涨得越多，允许回撤越少（锁定更多利润）
-		// 📊 用户反馈优化：放宽回撤限制，给予价格更多呼吸空间
-		var allowedDrawdownPct float64
+		// 🔧 修复：根据实际价格变动（不是杠杆盈利）决定止损位置
+		// 关键改进：止损应该跟随价格上涨，而不是给过大回撤空间
+		//
+		// 新策略：止损 = 入场价 + (当前价格 - 入场价) × 保护比例
+		// 例如：价格涨3%，保护70%利润 → 止损在入场价+2.1%
+		var newStopLoss float64
+		var protectionRatio float64  // 利润保护比例
+
 		if priceMovePct >= 10.0 {
-			allowedDrawdownPct = 4.0  // 价格涨≥10%时，允许回撤4%（原2%）
+			protectionRatio = 0.80  // 价格涨≥10%，保护80%利润
+		} else if priceMovePct >= 7.0 {
+			protectionRatio = 0.70  // 价格涨≥7%，保护70%利润
 		} else if priceMovePct >= 5.0 {
-			allowedDrawdownPct = 6.0  // 价格涨≥5%时，允许回撤6%（原3%）
-		} else if priceMovePct >= 3.0 {
-			allowedDrawdownPct = 8.0  // 价格涨≥3%时，允许回撤8%（原4%）
-		} else if priceMovePct >= 1.0 {
-			allowedDrawdownPct = 10.0  // 价格涨≥1%时，允许回撤10%（原5%）
+			protectionRatio = 0.60  // 价格涨≥5%，保护60%利润
 		} else {
-			// 价格变动<1%，不移动止损（已在前面过滤）
-			continue
+			protectionRatio = 0.50  // 价格涨<5%，保护50%利润（不会触发，因为触发阈值是5%）
 		}
 
-		// 🔧 修复：基于当前价格计算止损（允许一定回撤），而不是基于入场价加利润
-		// 这样可以确保止损价永远低于当前价（做多）或高于当前价（做空）
-		var newStopLoss float64
+		if side == "long" {
+			// 做多：止损 = 入场价 + (当前价 - 入场价) × 保护比例
+			priceGain := markPrice - entryPrice
+			newStopLoss = entryPrice + priceGain*protectionRatio
+		} else {
+			// 做空：止损 = 入场价 - (入场价 - 当前价) × 保护比例
+			priceGain := entryPrice - markPrice
+			newStopLoss = entryPrice - priceGain*protectionRatio
+		}
+
+		// 计算保本价
 		var breakEvenPrice float64
 		if side == "long" {
-			// 做多：止损价 = 当前价 × (1 - 允许回撤%)
-			newStopLoss = markPrice * (1.0 - allowedDrawdownPct*0.01)
-
-			// 🔒 保本保护：止损价不能低于保本价（入场价+0.1%手续费）
-			breakEvenPrice = entryPrice * 1.001
-			if newStopLoss < breakEvenPrice {
-				log.Printf("🔒 [保本保护] %s 止损从%.4f提升到保本价%.4f",
-					symbol, newStopLoss, breakEvenPrice)
-				newStopLoss = breakEvenPrice
-			}
+			breakEvenPrice = entryPrice * 1.001  // 保本价（入场价+0.1%手续费）
 		} else {
-			// 做空：止损价 = 当前价 × (1 + 允许回撤%)
-			newStopLoss = markPrice * (1.0 + allowedDrawdownPct*0.01)
-
-			// 🔒 保本保护：止损价不能高于保本价（入场价-0.1%手续费）
-			breakEvenPrice = entryPrice * 0.999
-			if newStopLoss > breakEvenPrice {
-				log.Printf("🔒 [保本保护] %s 止损从%.4f降低到保本价%.4f",
-					symbol, newStopLoss, breakEvenPrice)
-				newStopLoss = breakEvenPrice
-			}
+			breakEvenPrice = entryPrice * 0.999  // 保本价（入场价-0.1%手续费）
 		}
 
 		// 获取当前止损订单
@@ -229,35 +221,64 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 		var oldStopLoss float64
 
 		if err != nil {
-			// ✅ 如果没有找到当前止损单，直接设置新止损（不跳过！）
+			// ✅ 如果没有找到当前止损单，直接设置新止损
 			log.Printf("⚠️  [%s %s] 未找到现有止损单，将设置新止损", symbol, side)
 			shouldUpdate = true
 			oldStopLoss = 0 // 标记为没有旧止损
+
+			// 🔒 第一次设置止损：使用保本保护
+			if side == "long" && newStopLoss < breakEvenPrice {
+				log.Printf("🔒 [保本保护] %s 止损从%.4f提升到保本价%.4f",
+					symbol, newStopLoss, breakEvenPrice)
+				newStopLoss = breakEvenPrice
+			} else if side == "short" && newStopLoss > breakEvenPrice {
+				log.Printf("🔒 [保本保护] %s 止损从%.4f降低到保本价%.4f",
+					symbol, newStopLoss, breakEvenPrice)
+				newStopLoss = breakEvenPrice
+			}
 		} else {
 			// 有现有止损单，判断新止损是否更有利
 			oldStopLoss = currentStopLoss
-			if side == "long" && newStopLoss > currentStopLoss {
-				shouldUpdate = true
-			} else if side == "short" && newStopLoss < currentStopLoss {
-				shouldUpdate = true
-			}
-		}
 
-		if shouldUpdate {
-			// 更新止损
-			err := t.updateStopLoss(symbol, side, positionAmt, newStopLoss)
-			if err != nil {
-				log.Printf("⚠️  [移动止损失败] %s %s: %v", symbol, side, err)
-			} else {
-				if oldStopLoss > 0 {
-					log.Printf("📈 [移动止损] %s %s | 盈利%.1f%% | 当前价%.4f | 止损 %.4f → %.4f | 允许回撤%.1f%%",
-						symbol, strings.ToUpper(side), priceMovePct, markPrice, oldStopLoss, newStopLoss, allowedDrawdownPct)
+			// ✅ 修复：移动止损只能向有利方向移动
+			if side == "long" {
+				// 做多：新止损必须高于旧止损才更新（只升不降）
+				if newStopLoss > currentStopLoss {
+					shouldUpdate = true
+					log.Printf("📈 [移动止损触发] %s LONG | 旧止损%.4f → 新止损%.4f (提高%.4f)",
+						symbol, currentStopLoss, newStopLoss, newStopLoss-currentStopLoss)
 				} else {
-					log.Printf("📈 [设置止损] %s %s | 盈利%.1f%% | 当前价%.4f | 新止损 %.4f | 允许回撤%.1f%%",
-						symbol, strings.ToUpper(side), priceMovePct, markPrice, newStopLoss, allowedDrawdownPct)
+					log.Printf("💤 [移动止损跳过] %s LONG | 新止损%.4f ≤ 旧止损%.4f (不提高)",
+						symbol, newStopLoss, currentStopLoss)
+				}
+			} else {
+				// 做空：新止损必须低于旧止损才更新（只降不升）
+				if newStopLoss < currentStopLoss {
+					shouldUpdate = true
+					log.Printf("📈 [移动止损触发] %s SHORT | 旧止损%.4f → 新止损%.4f (降低%.4f)",
+						symbol, currentStopLoss, newStopLoss, currentStopLoss-newStopLoss)
+				} else {
+					log.Printf("💤 [移动止损跳过] %s SHORT | 新止损%.4f ≥ 旧止损%.4f (不降低)",
+						symbol, newStopLoss, currentStopLoss)
 				}
 			}
 		}
+
+			if shouldUpdate {
+				// 更新止损
+				err := t.updateStopLoss(symbol, side, positionAmt, newStopLoss)
+				if err != nil {
+					log.Printf("⚠️  [移动止损失败] %s %s: %v", symbol, side, err)
+				} else {
+					if oldStopLoss > 0 {
+						log.Printf("📈 [移动止损] %s %s | 盈利%.1f%% | 当前价%.4f | 止损 %.4f → %.4f | 保护%.0f%%利润",
+							symbol, strings.ToUpper(side), priceMovePct, markPrice, oldStopLoss, newStopLoss, protectionRatio*100)
+					} else {
+						log.Printf("📈 [设置止损] %s %s | 盈利%.1f%% | 当前价%.4f | 新止损 %.4f | 保护%.0f%%利润",
+							symbol, strings.ToUpper(side), priceMovePct, markPrice, newStopLoss, protectionRatio*100)
+					}
+				}
+			}
 	}
 
 	// 更新缓存
