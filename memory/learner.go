@@ -9,6 +9,23 @@ import (
 // 🧠 Learner 自适应学习器
 // 自动分析交易历史，生成学习总结
 
+// 🚨 黑名单：这些是结果型关键词，不应统计为信号
+var resultKeywordsBlacklist = []string{
+	"止盈", "止损", "自动触发", "触发", "强平", "爆仓",
+	"平仓", "获利", "亏损", "盈利", "收益",
+}
+
+// isResultKeyword 检查信号名是否为结果型关键词（应被过滤）
+func isResultKeyword(signalName string) bool {
+	nameLower := strings.ToLower(signalName)
+	for _, blocked := range resultKeywordsBlacklist {
+		if strings.Contains(nameLower, blocked) {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateLearningSummary 更新学习总结（每次添加交易后调用）
 // ⚠️ 注意：此方法假设调用者已经持有锁，不再重复加锁
 func (m *Manager) UpdateLearningSummary() error {
@@ -99,6 +116,11 @@ func (m *Manager) identifyFailurePatterns(summary *LearningSummary) {
 
 	// 模式1：特定信号成功率低（样本量要求提高到10）
 	for _, stat := range summary.SignalStats {
+		// 🚨 过滤结果型伪信号
+		if isResultKeyword(stat.SignalName) {
+			continue
+		}
+
 		if stat.TotalCount >= 10 && stat.WinRate < 0.35 {
 			pattern := fmt.Sprintf("⚠️ 信号\"%s\"成功率仅%.0f%%（%d胜%d负，样本:%d），建议降低权重",
 				stat.SignalName, stat.WinRate*100, stat.WinCount, stat.LossCount, stat.TotalCount)
@@ -161,6 +183,11 @@ func (m *Manager) identifySuccessPatterns(summary *LearningSummary) {
 
 	// 模式1：高成功率信号（样本量要求：至少20个，100%需要30个）
 	for _, stat := range summary.SignalStats {
+		// 🚨 过滤结果型伪信号
+		if isResultKeyword(stat.SignalName) {
+			continue
+		}
+
 		// 根据成功率要求不同的样本量
 		minSamples := 20
 		if stat.WinRate > 0.95 {
