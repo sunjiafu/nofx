@@ -12,6 +12,7 @@ import (
 	"nofx/pool"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 )
@@ -292,17 +293,36 @@ func (at *AutoTrader) Run() error {
 	ticker := time.NewTicker(at.config.ScanInterval)
 	defer ticker.Stop()
 
-	// 首次立即执行
-	if err := at.runCycle(); err != nil {
-		log.Printf("❌ 执行失败: %v", err)
-	}
+	// 首次立即执行（带panic recovery）
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("❌ PANIC恢复（首次执行）: %v", r)
+				log.Printf("📍 堆栈信息: %s", debug.Stack())
+			}
+		}()
+
+		if err := at.runCycle(); err != nil {
+			log.Printf("❌ 执行失败: %v", err)
+		}
+	}()
 
 	for at.isRunning {
 		select {
 		case <-ticker.C:
-			if err := at.runCycle(); err != nil {
-				log.Printf("❌ 执行失败: %v", err)
-			}
+			// 🛡️ 添加panic recovery，防止单次执行失败导致整个循环停止
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("❌ PANIC恢复: %v", r)
+						log.Printf("📍 堆栈信息: %s", debug.Stack())
+					}
+				}()
+
+				if err := at.runCycle(); err != nil {
+					log.Printf("❌ 执行失败: %v", err)
+				}
+			}()
 		}
 	}
 
