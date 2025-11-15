@@ -412,18 +412,15 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 
 // shouldClosePosition 基于AI预测判断是否应该平仓
 func (o *DecisionOrchestrator) shouldClosePosition(pos PositionInfoInput, prediction *types.Prediction) bool {
-	// 1. 如果预测方向与持仓方向完全相反，且概率>65% 且 持仓>30分钟 → 平仓
 	holdDuration := time.Since(pos.OpenTime)
 
+	// 1. 🔧 修复：如果预测方向与持仓方向完全相反，且概率>65% → 立即平仓
+	// 不应该等30分钟，方向错了就要及时止损
 	if pos.Side == "long" && prediction.Direction == "down" && prediction.Probability > 0.65 {
-		if holdDuration > 30*time.Minute {
-			return true
-		}
+		return true
 	}
 	if pos.Side == "short" && prediction.Direction == "up" && prediction.Probability > 0.65 {
-		if holdDuration > 30*time.Minute {
-			return true
-		}
+		return true
 	}
 
 	// 2. 如果已经亏损>10% → 止损
@@ -433,6 +430,11 @@ func (o *DecisionOrchestrator) shouldClosePosition(pos PositionInfoInput, predic
 
 	// 3. 如果已经盈利>20% 且预测变为中性 → 获利了结
 	if pos.UnrealizedPnLPct > 20.0 && prediction.Direction == "neutral" {
+		return true
+	}
+
+	// 4. 如果持仓时间过长（超过24小时）且未盈利 → 平仓
+	if holdDuration > 24*time.Hour && pos.UnrealizedPnLPct < 5.0 {
 		return true
 	}
 
