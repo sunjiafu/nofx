@@ -163,6 +163,8 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 		// 说明：仓位保证金~10 USDT，1%波动只有0.1 USDT，太容易被扫
 		//       提高到5%后，波动0.5 USDT，更安全
 		if priceMovePct < 5.0 {
+			log.Printf("💤 [跳过移动止损] %s %s | 价格变动%.2f%% < 5.0%% (阈值未达到)",
+				symbol, side, priceMovePct)
 			continue
 		}
 
