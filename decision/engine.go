@@ -189,6 +189,7 @@ func convertToAgentContext(ctx *Context) *agents.Context {
 			LiquidationPrice: pos.LiquidationPrice,
 			MarginUsed:       pos.MarginUsed,
 			UpdateTime:       pos.UpdateTime,
+			OpenTime:         pos.OpenTime, // 🐛 修复：必须复制OpenTime，否则持仓时长计算错误
 		}
 	}
 
