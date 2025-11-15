@@ -204,7 +204,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	var altcoinScanner *market.AltcoinScanner
 	var altcoinLogger *market.AltcoinSignalLogger
 	var spotFuturesMonitor *market.SpotFuturesMonitor // 🆕 现货期货价差监控
-	altcoinScanEnabled := true // 🚀 启用WebSocket方案
+	altcoinScanEnabled := false // 🔧 禁用WebSocket方案（减少服务器压力）
 
 	if config.Exchange == "binance" && altcoinScanEnabled {
 		// 获取Binance客户端
