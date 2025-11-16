@@ -159,11 +159,11 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 			priceMovePct = ((entryPrice - markPrice) / entryPrice) * 100
 		}
 
-		// 【优化1】提高触发阈值：价格变动≥5%时才触发移动止损（避免小波动被扫）
-		// 说明：仓位保证金~10 USDT，1%波动只有0.1 USDT，太容易被扫
-		//       提高到5%后，波动0.5 USDT，更安全
-		if priceMovePct < 5.0 {
-			log.Printf("💤 [跳过移动止损] %s %s | 价格变动%.2f%% < 5.0%% (阈值未达到)",
+		// 【优化1】触发阈值：价格变动≥2%时才触发移动止损
+		// 说明：5%阈值太高导致移动止损从未生效（实际市场波动0.x%-1.71%）
+		//       降低到2%后，能够实际保护盈利（例如SOL曾达13.64%利润但未保护）
+		if priceMovePct < 2.0 {
+			log.Printf("💤 [跳过移动止损] %s %s | 价格变动%.2f%% < 2.0%% (阈值未达到)",
 				symbol, side, priceMovePct)
 			continue
 		}

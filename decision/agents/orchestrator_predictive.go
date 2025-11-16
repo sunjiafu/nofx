@@ -794,18 +794,38 @@ func (o *DecisionOrchestrator) validateRiskParameters(
 		tpMultiple = (currentPrice - takeProfit) / atr
 	}
 
-	// 🚨 检查止损是否在ATR合理范围内 [2.0-8.0倍]
+	// 🔧 低波动豁免机制：当ATR极低时（<0.3%），豁免倍数检查，只验证绝对值
+	// 原因：低波动市场(ATR=0.13%)时，5%止损会是38.5倍ATR，超过25倍上限导致无法开仓
+	//       但5%止损在低波动市场是合理的，应该允许
+	if atrPct < 0.3 {
+		// 低波动市场：只检查止损止盈的绝对值是否合理
+		if stopDistancePct < 3.0 || stopDistancePct > 10.0 {
+			return fmt.Errorf("低波动市场止损%.2f%%超出合理范围[3.0-10.0]%%（ATR仅%.2f%%，豁免倍数检查）",
+				stopDistancePct, atrPct)
+		}
+		if tpDistancePct < 5.0 || tpDistancePct > 20.0 {
+			return fmt.Errorf("低波动市场止盈%.2f%%超出合理范围[5.0-20.0]%%（ATR仅%.2f%%，豁免倍数检查）",
+				tpDistancePct, atrPct)
+		}
+		log.Printf("✅ [低波动豁免] ATR=%.2f%% < 0.3%%, 豁免倍数检查，止损%.2f%% 止盈%.2f%% 在绝对值合理范围内",
+			atrPct, stopDistancePct, tpDistancePct)
+		// 继续检查R/R比，跳过倍数检查
+		goto checkRiskReward
+	}
+
+	// 🚨 检查止损是否在ATR合理范围内 [2.0-25.0倍]
 	if stopMultiple < MinStopMultiple || stopMultiple > MaxStopMultiple {
 		return fmt.Errorf("止损倍数%.2fx超出合理范围[%.1f-%.1f]ATR（止损%.2f%%, ATR%%=%.2f%%）",
 			stopMultiple, MinStopMultiple, MaxStopMultiple, stopDistancePct, atrPct)
 	}
 
-	// 🚨 检查止盈是否在ATR合理范围内 [6.0-20.0倍]
+	// 🚨 检查止盈是否在ATR合理范围内 [3.0-30.0倍]
 	if tpMultiple < MinTPMultiple || tpMultiple > MaxTPMultiple {
 		return fmt.Errorf("止盈倍数%.2fx超出合理范围[%.1f-%.1f]ATR（止盈%.2f%%, ATR%%=%.2f%%）",
 			tpMultiple, MinTPMultiple, MaxTPMultiple, tpDistancePct, atrPct)
 	}
 
+checkRiskReward:
 	// 2️⃣ 计算R/R比（使用与riskAgent相同的逻辑）
 	riskReward := tpDistancePct / stopDistancePct
 
