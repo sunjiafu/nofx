@@ -111,32 +111,39 @@ func (e *EntryTimingEngine) validateTrend(direction string, md *market.Data) err
 	plusDI := md.CurrentPlusDI
 	minusDI := md.CurrentMinusDI
 
-	if direction == "up" {
-		// ✅ 做多：价格必须在EMA50上方（长期趋势向上）
-		if currentPrice < ema50 {
-			distPct := (currentPrice - ema50) / ema50 * 100
-			return fmt.Errorf("价格%.2f < EMA50 %.2f (%.2f%%)，长期趋势向下",
-				currentPrice, ema50, distPct)
-		}
+	// 计算价格相对EMA50的偏离度
+	distPct := (currentPrice - ema50) / ema50 * 100
 
-		// ✅ 做多：+DI必须 > -DI（多头力量占优）
+	// 🔧 容差范围：价格在EMA50的±1%内视为盘整区间
+	// 盘整区间内主要依靠+DI/-DI判断，不强制要求价格位置
+	const tolerancePct = 1.0
+
+	if direction == "up" {
+		// ✅ 做多：+DI必须 > -DI（多头力量占优）- 这是核心条件
 		if plusDI <= minusDI {
 			return fmt.Errorf("+DI(%.1f) ≤ -DI(%.1f)，多空力量对比不利",
 				plusDI, minusDI)
 		}
 
-	} else if direction == "down" {
-		// ✅ 做空：价格必须在EMA50下方（长期趋势向下）
-		if currentPrice > ema50 {
-			distPct := (currentPrice - ema50) / ema50 * 100
-			return fmt.Errorf("价格%.2f > EMA50 %.2f (%.2f%%)，长期趋势向上",
-				currentPrice, ema50, distPct)
+		// 🔧 价格检查：只有在明显低于EMA50时才拒绝（偏离>1%）
+		// 允许在EMA50附近盘整时开多（只要+DI占优）
+		if distPct < -tolerancePct {
+			return fmt.Errorf("价格%.2f < EMA50 %.2f (%.2f%%)，长期趋势向下（偏离超过%.1f%%容差）",
+				currentPrice, ema50, distPct, tolerancePct)
 		}
 
-		// ✅ 做空：-DI必须 > +DI（空头力量占优）
+	} else if direction == "down" {
+		// ✅ 做空：-DI必须 > +DI（空头力量占优）- 这是核心条件
 		if minusDI <= plusDI {
 			return fmt.Errorf("-DI(%.1f) ≤ +DI(%.1f)，多空力量对比不利",
 				minusDI, plusDI)
+		}
+
+		// 🔧 价格检查：只有在明显高于EMA50时才拒绝（偏离>1%）
+		// 允许在EMA50附近盘整时开空（只要-DI占优）
+		if distPct > tolerancePct {
+			return fmt.Errorf("价格%.2f > EMA50 %.2f (%.2f%%)，长期趋势向上（偏离超过%.1f%%容差）",
+				currentPrice, ema50, distPct, tolerancePct)
 		}
 	}
 
