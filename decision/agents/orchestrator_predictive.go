@@ -807,13 +807,15 @@ func (o *DecisionOrchestrator) validateRiskParameters(
 	// 原因：低波动市场(ATR=0.13%)时，5%止损会是38.5倍ATR，超过25倍上限导致无法开仓
 	//       但5%止损在低波动市场是合理的，应该允许
 	if atrPct < 0.3 {
-		// 低波动市场：只检查止损止盈的绝对值是否合理
-		if stopDistancePct < 3.0 || stopDistancePct > 10.0 {
-			return fmt.Errorf("低波动市场止损%.2f%%超出合理范围[3.0-10.0]%%（ATR仅%.2f%%，豁免倍数检查）",
+		// 低波动市场：放宽绝对值范围（允许更小的止损距离）
+		// 止损：1.0-10.0%（正常市场3-10%，低波动市场允许更小）
+		// 止盈：2.0-20.0%（正常市场5-20%，低波动市场允许更小）
+		if stopDistancePct < 1.0 || stopDistancePct > 10.0 {
+			return fmt.Errorf("低波动市场止损%.2f%%超出合理范围[1.0-10.0]%%（ATR仅%.2f%%，豁免倍数检查）",
 				stopDistancePct, atrPct)
 		}
-		if tpDistancePct < 5.0 || tpDistancePct > 20.0 {
-			return fmt.Errorf("低波动市场止盈%.2f%%超出合理范围[5.0-20.0]%%（ATR仅%.2f%%，豁免倍数检查）",
+		if tpDistancePct < 2.0 || tpDistancePct > 20.0 {
+			return fmt.Errorf("低波动市场止盈%.2f%%超出合理范围[2.0-20.0]%%（ATR仅%.2f%%，豁免倍数检查）",
 				tpDistancePct, atrPct)
 		}
 		log.Printf("✅ [低波动豁免] ATR=%.2f%% < 0.3%%, 豁免倍数检查，止损%.2f%% 止盈%.2f%% 在绝对值合理范围内",
