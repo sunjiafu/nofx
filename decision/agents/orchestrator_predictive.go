@@ -375,12 +375,17 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 					continue
 				}
 
-				// TODO: 后续实现限价单逻辑
+				// 🆕 限价单支持：如果需要等待回调，创建限价单决策
+				isLimitOrder := false
+				limitPrice := 0.0
 				if entryDecision.Strategy == "wait_pullback" {
-					cotBuilder.WriteString(fmt.Sprintf("**%s**: ⏰ 需要等待回调到%.2f（当前%.2f），暂不支持限价单\n\n",
-						vp.symbol, entryDecision.LimitPrice, entryDecision.CurrentPrice))
-					log.Printf("⏸️  [%s] 需要等待回调（限价单功能开发中）: %s", vp.symbol, entryDecision.Reasoning)
-					continue
+					isLimitOrder = true
+					limitPrice = entryDecision.LimitPrice
+					cotBuilder.WriteString(fmt.Sprintf("**%s**: ⏰ 限价单模式 - 等待回调到%.4f（当前%.4f，回调%.2f%%）\n",
+						vp.symbol, limitPrice, entryDecision.CurrentPrice, entryDecision.PullbackPct))
+					cotBuilder.WriteString(fmt.Sprintf("  推理: %s\n\n", entryDecision.Reasoning))
+					log.Printf("📝 [%s] 限价单: 等待回调到%.4f (当前%.4f): %s",
+						vp.symbol, limitPrice, entryDecision.CurrentPrice, entryDecision.Reasoning)
 				}
 
 				requiredMargin := positionSize / float64(leverage)
@@ -426,6 +431,11 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 					Reasoning: fmt.Sprintf("AI预测: %s (概率%.0f%%, 期望%+.2f%%) | %s",
 						vp.prediction.Direction, vp.prediction.Probability*100,
 						vp.prediction.ExpectedMove, vp.prediction.Reasoning),
+
+					// 🆕 限价单字段
+					IsLimitOrder: isLimitOrder,
+					LimitPrice:   limitPrice,
+					CurrentPrice: marketData.CurrentPrice,
 				})
 
 				if err := predTracker.Record(vp.prediction, marketData.CurrentPrice); err != nil {

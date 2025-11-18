@@ -1149,3 +1149,130 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+// ==================== 限价单功能 ====================
+
+// PlaceLimitOrder 下限价单
+func (t *FuturesTrader) PlaceLimitOrder(symbol string, side OrderSide, price, quantity float64, leverage int) (map[string]interface{}, error) {
+	// ✅ 冷却期检查
+	if err := t.checkCooldown(symbol); err != nil {
+		return nil, err
+	}
+
+	// 先取消该币种的所有委托单（清理旧限价单）
+	if err := t.CancelAllOrders(symbol); err != nil {
+		log.Printf("  ⚠ 取消旧委托单失败（可能没有委托单）: %v", err)
+	}
+
+	// 设置杠杆
+	if err := t.SetLeverage(symbol, leverage); err != nil {
+		return nil, err
+	}
+
+	// 设置逐仓模式
+	if err := t.SetMarginType(symbol, futures.MarginTypeIsolated); err != nil {
+		return nil, err
+	}
+
+	// 格式化价格和数量
+	priceStr, err := t.FormatPrice(symbol, price)
+	if err != nil {
+		return nil, fmt.Errorf("格式化价格失败: %w", err)
+	}
+
+	quantityStr, err := t.FormatQuantity(symbol, quantity)
+	if err != nil {
+		return nil, fmt.Errorf("格式化数量失败: %w", err)
+	}
+
+	// 验证最小名义价值
+	formattedQty, _ := strconv.ParseFloat(quantityStr, 64)
+	notionalValue := formattedQty * price
+	if notionalValue < 100 {
+		return nil, fmt.Errorf("名义价值%.2f USDT < 100 USDT最小要求", notionalValue)
+	}
+
+	// 确定订单方向
+	var orderSide futures.SideType
+	var positionSide futures.PositionSideType
+
+	if side == OrderSideBuy {
+		orderSide = futures.SideTypeBuy
+		positionSide = futures.PositionSideTypeLong
+	} else {
+		orderSide = futures.SideTypeSell
+		positionSide = futures.PositionSideTypeShort
+	}
+
+	// 创建限价单
+	order, err := t.client.NewCreateOrderService().
+		Symbol(symbol).
+		Side(orderSide).
+		PositionSide(positionSide).
+		Type(futures.OrderTypeLimit).
+		TimeInForce(futures.TimeInForceTypeGTC). // GTC: Good Till Cancel
+		Quantity(quantityStr).
+		Price(priceStr).
+		Do(context.Background())
+
+	if err != nil {
+		return nil, fmt.Errorf("下限价单失败: %w", err)
+	}
+
+	log.Printf("✅ 限价单已提交: %s %s @ %s (数量: %s, 订单ID: %d)",
+		symbol, side, priceStr, quantityStr, order.OrderID)
+
+	// 清空缓存
+	t.invalidateCache()
+
+	result := make(map[string]interface{})
+	result["orderId"] = order.OrderID
+	result["symbol"] = order.Symbol
+	result["status"] = order.Status
+	result["price"] = price
+	result["quantity"] = formattedQty
+
+	return result, nil
+}
+
+// CancelLimitOrder 取消限价单
+func (t *FuturesTrader) CancelLimitOrder(symbol string, orderID int64) error {
+	_, err := t.client.NewCancelOrderService().
+		Symbol(symbol).
+		OrderID(orderID).
+		Do(context.Background())
+
+	if err != nil {
+		return fmt.Errorf("取消订单失败: %w", err)
+	}
+
+	log.Printf("🗑️  已取消限价单: %s (订单ID: %d)", symbol, orderID)
+	t.invalidateCache()
+	return nil
+}
+
+// GetOrderStatus 查询订单状态
+func (t *FuturesTrader) GetOrderStatus(symbol string, orderID int64) (map[string]interface{}, error) {
+	order, err := t.client.NewGetOrderService().
+		Symbol(symbol).
+		OrderID(orderID).
+		Do(context.Background())
+
+	if err != nil {
+		return nil, fmt.Errorf("查询订单失败: %w", err)
+	}
+
+	result := make(map[string]interface{})
+	result["orderId"] = order.OrderID
+	result["symbol"] = order.Symbol
+	result["status"] = order.Status
+	result["side"] = order.Side
+	result["type"] = order.Type
+	result["price"], _ = strconv.ParseFloat(order.Price, 64)
+	result["origQty"], _ = strconv.ParseFloat(order.OrigQuantity, 64)
+	result["executedQty"], _ = strconv.ParseFloat(order.ExecutedQuantity, 64)
+	result["avgPrice"], _ = strconv.ParseFloat(order.AvgPrice, 64)
+	result["updateTime"] = order.UpdateTime
+
+	return result, nil
+}

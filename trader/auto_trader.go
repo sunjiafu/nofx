@@ -70,6 +70,9 @@ type AutoTraderConfig struct {
 	MaxDailyLoss    float64       // 最大日亏损百分比（提示）
 	MaxDrawdown     float64       // 最大回撤百分比（提示）
 	StopTradingTime time.Duration // 触发风控后暂停时长
+
+	// 限价单模式
+	UseLimitOrders bool // 是否使用限价单模式（默认false=市价单）
 }
 
 // AutoTrader 自动交易器
@@ -84,6 +87,7 @@ type AutoTrader struct {
 	decisionLogger        *logger.DecisionLogger // 决策日志记录器
 	constraints           *TradingConstraints    // 交易硬约束管理器
 	memoryManager         *memory.Manager        // 🧠 记忆管理器（Sprint 1）
+	orderManager          *OrderManager          // 📋 限价单管理器
 	initialBalance        float64
 	dailyPnL              float64
 	lastResetTime         time.Time
@@ -250,7 +254,8 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		mcpClient:             mcpClient,
 		decisionLogger:        decisionLogger,
 		constraints:           constraints,
-		memoryManager:         memoryManager, // 🧠 记忆系统
+		memoryManager:         memoryManager,     // 🧠 记忆系统
+		orderManager:          NewOrderManager(), // 📋 限价单管理器
 		initialBalance:        config.InitialBalance,
 		lastResetTime:         time.Now(),
 		startTime:             time.Now(),
@@ -369,6 +374,12 @@ func (at *AutoTrader) runCycle() error {
 		at.dailyPnL = 0
 		at.lastResetTime = time.Now()
 		log.Println("📅 日盈亏已重置")
+	}
+
+	// 2.5 检查并更新限价单状态（在AI决策前处理已成交订单）
+	if err := at.checkAndUpdateLimitOrders(); err != nil {
+		log.Printf("⚠️  检查限价单状态失败: %v", err)
+		// 不影响主流程，继续执行
 	}
 
 	// 3. 收集交易上下文
@@ -817,6 +828,12 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 
 // executeDecisionWithRecord 执行AI决策并记录详细信息
 func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	// 🆕 限价单模式：检查是否是限价单开仓决策
+	if decision.IsLimitOrder && (decision.Action == "open_long" || decision.Action == "open_short") {
+		return at.executeOpenLimitOrderWithRecord(decision, actionRecord)
+	}
+
+	// 原有的市价单执行逻辑
 	switch decision.Action {
 	case "open_long":
 		return at.executeOpenLongWithRecord(decision, actionRecord)

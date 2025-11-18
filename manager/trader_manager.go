@@ -24,7 +24,7 @@ func NewTraderManager() *TraderManager {
 }
 
 // AddTrader 添加一个trader
-func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig) error {
+func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, useLimitOrders bool) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -63,6 +63,7 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
+		UseLimitOrders:        useLimitOrders, // 🆕 限价单模式开关
 	}
 
 	// 创建trader实例

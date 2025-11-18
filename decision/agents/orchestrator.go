@@ -66,6 +66,11 @@ type Decision struct {
 	Confidence      int     `json:"confidence,omitempty"`
 	RiskUSD         float64 `json:"risk_usd,omitempty"`
 	Reasoning       string  `json:"reasoning"`
+
+	// 限价单相关字段
+	IsLimitOrder bool    `json:"is_limit_order,omitempty"` // 是否是限价单
+	LimitPrice   float64 `json:"limit_price,omitempty"`    // 限价单价格
+	CurrentPrice float64 `json:"current_price,omitempty"`  // 当前价格（用于对比）
 }
 
 // FullDecision AI的完整决策（包含思维链）
