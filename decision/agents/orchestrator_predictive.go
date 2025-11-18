@@ -574,8 +574,8 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 	// 在低波动市场中，AI可能给出极小的值，需要根据ATR调整
 	atrPct := (marketData.LongerTermContext.ATR14 / marketData.CurrentPrice) * 100
 
-	// 动态计算最小case值：至少为3倍ATR（确保止盈/止损倍数在合理范围）
-	minCaseValue := math.Max(0.5, atrPct*3.0)
+	// 动态计算最小case值：至少为4.5倍ATR（与MinStopMultiple对齐）
+	minCaseValue := math.Max(0.5, atrPct*MinStopMultiple)
 
 	if math.Abs(prediction.BestCase) < minCaseValue {
 		log.Printf("⚠️  %s best_case=%.2f%%过小（ATR%%=%.2f%%），调整为%.2f%%",
