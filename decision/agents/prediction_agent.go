@@ -169,16 +169,17 @@ func (agent *PredictionAgent) buildPredictionPrompt(ctx *PredictionContext) (sys
 【0. 🎯 综合决策框架（核心优先级）】
 
 ⚠️ **决策优先级**（从高到低）：
-1. 账户风险控制（保证金占用、浮动盈亏）
+1. 账户风险控制（累计盈亏、保证金占用）
 2. 持仓状态分析（盈亏、持仓时长、方向）
 3. 技术指标验证（趋势、动量、超买超卖）
 4. 市场情绪参考（资金费率、OI变化、情绪指数）
 
 ✅ **必须遵守的决策逻辑**：
-- 账户浮亏 > 8% → 🛑 停止新开仓，倾向neutral（prob=0.50-0.55）
-- 账户浮亏 5-8% → ⚠️ 新开仓概率必须 ≥ 0.75，且优先考虑与持仓对冲
-- 账户浮亏 2-5% → ⚠️ 新开仓概率必须 ≥ 0.70
-- 账户浮亏 < 2% → ✅ 正常开仓（概率 ≥ 0.65）
+- 账户累计亏损 > 20% → 🛑 **严格禁止**新开仓，必须输出neutral（prob=0.50-0.55）
+- 账户累计亏损 15-20% → ⚠️ 新开仓概率必须 ≥ 0.85（极高确定性）
+- 账户累计亏损 10-15% → ⚠️ 新开仓概率必须 ≥ 0.78
+- 账户累计亏损 5-10% → ⚠️ 新开仓概率建议 ≥ 0.70
+- 账户累计亏损 < 5% → ✅ 正常开仓（概率 ≥ 0.65）
 - 持仓已满(3/3) → 🔒 新机会概率必须 > 0.80
 - 保证金占用 > 60% → 🛑 严禁新开仓，倾向neutral
 - 保证金占用 > 40% → ⚠️ 降低预期收益(expected_move ≤ 2%)
@@ -423,7 +424,11 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 		// 2️⃣ 风险指标
 		sb.WriteString(fmt.Sprintf("保证金占用: %.1f%% | ", ctx.Account.MarginUsedPct))
 
-		// 计算总未实现盈亏
+		// 🔧 使用账户总体盈亏（已实现+未实现）
+		accountTotalPnL := ctx.Account.TotalPnL
+		accountTotalPnLPct := ctx.Account.TotalPnLPct
+
+		// 计算当前持仓浮动盈亏（仅用于显示）
 		totalUnrealizedPnL := 0.0
 		totalUnrealizedPnLPct := 0.0
 		if len(ctx.Positions) > 0 {
@@ -433,8 +438,8 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 			totalUnrealizedPnLPct = (totalUnrealizedPnL / ctx.Account.TotalEquity) * 100
 		}
 
-		sb.WriteString(fmt.Sprintf("浮动盈亏: %+.2f USDT (%+.2f%%)\n",
-			totalUnrealizedPnL, totalUnrealizedPnLPct))
+		sb.WriteString(fmt.Sprintf("账户总盈亏: %+.2f USDT (%+.2f%%) | 持仓浮动: %+.2f USDT (%+.2f%%)\n",
+			accountTotalPnL, accountTotalPnLPct, totalUnrealizedPnL, totalUnrealizedPnLPct))
 
 		// 3️⃣ 风险等级评估
 		riskLevel := "低"
@@ -488,22 +493,24 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 					pos.Leverage, holdingTime))
 			}
 
-			// 5️⃣ 持仓风险提示
+			// 5️⃣ 账户风控提示（基于账户总体盈亏）
 			sb.WriteString("\n⚠️ 决策要求:\n")
 
-			// 根据持仓盈亏给出建议
-			if totalUnrealizedPnLPct < -8 {
-				sb.WriteString("- 🛑 账户浮亏 > 8%，停止新开仓，倾向neutral（概率0.50-0.55）\n")
-				sb.WriteString("- 优先减仓或止损，避免进一步扩大亏损\n")
-			} else if totalUnrealizedPnLPct < -5 {
-				sb.WriteString("- 🚨 账户浮亏5-8%，新开仓概率必须 ≥ 0.75\n")
+			// 🔧 根据账户总体盈亏给出强制约束（不是持仓浮动盈亏）
+			if accountTotalPnLPct < -20 {
+				sb.WriteString("- 🛑 账户累计亏损 > 20%，**严格禁止**新开仓，必须输出neutral（概率0.50-0.55）\n")
+				sb.WriteString("- 立即减仓或止损，保护剩余资金\n")
+			} else if accountTotalPnLPct < -15 {
+				sb.WriteString("- 🚨 账户累计亏损15-20%，新开仓概率必须 ≥ 0.85（极高确定性）\n")
 				sb.WriteString("- 优先考虑与现有持仓风险对冲的方向\n")
 				sb.WriteString("- 检查亏损持仓是否需要止损\n")
-			} else if totalUnrealizedPnLPct < -2 {
-				sb.WriteString("- ⚠️ 账户浮亏2-5%，新开仓概率必须 ≥ 0.70\n")
+			} else if accountTotalPnLPct < -10 {
+				sb.WriteString("- ⚠️ 账户累计亏损10-15%，新开仓概率必须 ≥ 0.78\n")
 				sb.WriteString("- 检查亏损持仓是否需要调整或止损\n")
-			} else if totalUnrealizedPnLPct > 5 {
-				sb.WriteString("- ✅ 账户盈利 > 5%，可考虑部分止盈锁定利润\n")
+			} else if accountTotalPnLPct < -5 {
+				sb.WriteString("- 💡 账户累计亏损5-10%，新开仓概率建议 ≥ 0.70\n")
+			} else if accountTotalPnLPct > 10 {
+				sb.WriteString("- ✅ 账户盈利 > 10%，可考虑部分止盈锁定利润\n")
 				sb.WriteString("- 检查盈利持仓是否达到移动止损条件\n")
 			}
 

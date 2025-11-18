@@ -269,15 +269,44 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 				prediction.Confidence, prediction.RiskLevel, prediction.BestCase, prediction.WorstCase))
 			cotBuilder.WriteString(fmt.Sprintf("  推理: %s\n", prediction.Reasoning))
 
+			// 🛡️ 强制风控检查：账户累计亏损限制
+			accountTotalPnLPct := ctx.Account.TotalPnLPct
+			var accountRiskViolation string
+			var requiredMinProb float64 = minProbability
+
+			if accountTotalPnLPct < -20 {
+				// 亏损 > 20%：严格禁止新开仓
+				accountRiskViolation = fmt.Sprintf("账户累计亏损%.2f%% > 20%%，严格禁止新开仓", accountTotalPnLPct)
+				requiredMinProb = 1.01 // 设置一个不可能达到的阈值，强制拒绝
+			} else if accountTotalPnLPct < -15 {
+				// 亏损 15-20%：要求极高概率
+				requiredMinProb = math.Max(requiredMinProb, 0.85)
+			} else if accountTotalPnLPct < -10 {
+				// 亏损 10-15%：要求高概率
+				requiredMinProb = math.Max(requiredMinProb, 0.78)
+			} else if accountTotalPnLPct < -5 {
+				// 亏损 5-10%：建议高概率
+				requiredMinProb = math.Max(requiredMinProb, 0.70)
+			}
+
 			// 判断是否值得开仓
-			// 条件：1) 概率满足动态阈值 2) 置信度满足要求 3) 方向明确
+			// 条件：1) 账户风控通过 2) 概率满足动态阈值 3) 置信度满足要求 4) 方向明确
 			meetsConfidence := prediction.Confidence == "high" ||
 				prediction.Confidence == "very_high" ||
 				(allowMediumConf && prediction.Confidence == "medium")
 
-			if prediction.Probability >= minProbability && meetsConfidence && prediction.Direction != "neutral" {
-				cotBuilder.WriteString(fmt.Sprintf("  ✓ 满足开仓条件（概率%.0f%% >= %.0f%% 且 置信度%s）\n\n",
-					prediction.Probability*100, minProbability*100, prediction.Confidence))
+			if accountRiskViolation != "" {
+				// 账户风控不通过，强制拒绝
+				cotBuilder.WriteString(fmt.Sprintf("  × %s\n\n", accountRiskViolation))
+			} else if prediction.Probability >= requiredMinProb && meetsConfidence && prediction.Direction != "neutral" {
+				cotBuilder.WriteString(fmt.Sprintf("  ✓ 满足开仓条件（概率%.0f%% >= %.0f%% 且 置信度%s）\n",
+					prediction.Probability*100, requiredMinProb*100, prediction.Confidence))
+				if requiredMinProb > minProbability {
+					cotBuilder.WriteString(fmt.Sprintf("    （账户亏损%.2f%%，提高概率要求至%.0f%%）\n\n",
+						accountTotalPnLPct, requiredMinProb*100))
+				} else {
+					cotBuilder.WriteString("\n")
+				}
 
 				validPredictions = append(validPredictions, struct {
 					symbol     string
@@ -287,9 +316,14 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 				// 详细说明不满足的原因
 				if prediction.Direction == "neutral" {
 					cotBuilder.WriteString(fmt.Sprintf("  × 方向neutral，不开仓\n\n"))
-				} else if prediction.Probability < minProbability {
-					cotBuilder.WriteString(fmt.Sprintf("  × 概率%.0f%% < 阈值%.0f%% (夏普调整)\n\n",
-						prediction.Probability*100, minProbability*100))
+				} else if prediction.Probability < requiredMinProb {
+					if accountTotalPnLPct < -5 {
+						cotBuilder.WriteString(fmt.Sprintf("  × 概率%.0f%% < 风控要求%.0f%% (账户亏损%.2f%%)\n\n",
+							prediction.Probability*100, requiredMinProb*100, accountTotalPnLPct))
+					} else {
+						cotBuilder.WriteString(fmt.Sprintf("  × 概率%.0f%% < 阈值%.0f%% (夏普调整)\n\n",
+							prediction.Probability*100, requiredMinProb*100))
+					}
 				} else if !meetsConfidence {
 					cotBuilder.WriteString(fmt.Sprintf("  × 置信度%s不满足要求 (需要high", prediction.Confidence))
 					if allowMediumConf {
