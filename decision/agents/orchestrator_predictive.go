@@ -482,10 +482,10 @@ func (o *DecisionOrchestrator) shouldClosePositionWithReason(pos PositionInfoInp
 		}
 	}
 
-	// 2. 如果已经亏损>10% → 止损
-	if pos.UnrealizedPnLPct < -10.0 {
+	// 2. 如果已经亏损>20% → 止损
+	if pos.UnrealizedPnLPct < -20.0 {
 		log.Printf("  → 触发条件2: 止损(亏损%.2f%%)", pos.UnrealizedPnLPct)
-		return true, fmt.Sprintf("止损: 亏损%.2f%% > 10%%", pos.UnrealizedPnLPct)
+		return true, fmt.Sprintf("止损: 亏损%.2f%% > 20%%", pos.UnrealizedPnLPct)
 	}
 
 	// 3. 如果已经盈利>20% 且预测变为中性 → 获利了结
