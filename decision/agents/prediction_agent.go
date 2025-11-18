@@ -208,15 +208,15 @@ func (agent *PredictionAgent) buildPredictionPrompt(ctx *PredictionContext) (sys
 
 【做多禁止】
 - RSI7 > 75 或 RSI14 > 75              # 过度超买 → 禁止追涨（与Entry Engine统一）
-- 1h涨幅 > 6% 或 价格 > EMA20 + 4%     # 大阳线 + 偏离均线（与Entry Engine统一）
-- atr% > 3.5 且 1h涨幅 > 3.5%           # 高波动+大单边拉升
+- 1h涨幅 > 4% 或 价格 > EMA20 + 3%     # 大阳线 + 偏离均线（BTC/ETH实际波动调整）
+- atr% > 3.5 且 1h涨幅 > 3%             # 高波动+大单边拉升（降低阈值）
 - -DI > +DI * 1.5                        # 空头力量明显占优（≥50%）
 - ADX>25 且 p<EMA50 且 -DI>+DI           # 强下跌趋势中禁止抄底
 
 【做空禁止】
 - RSI7 < 35 或 RSI14 < 35              # 接近超卖 → 禁止杀跌（与Entry Engine统一）
-- 1h跌幅 < -4% 且 价格 < EMA20 - 3%    # 大阴线 + 跌破均线
-- atr% > 3.5 且 1h跌幅 < -3.5%          # 高波动+大单边下跌
+- 1h跌幅 < -3% 且 价格 < EMA20 - 2%    # 大阴线 + 跌破均线（BTC/ETH实际波动调整）
+- atr% > 3.5 且 1h跌幅 < -3%            # 高波动+大单边下跌（降低阈值）
 - +DI > -DI * 1.5                        # 多头力量明显占优（≥50%）
 - ADX>25 且 p>EMA50 且 +DI>-DI           # 强上涨趋势中禁止抄底做空
 
@@ -225,13 +225,13 @@ func (agent *PredictionAgent) buildPredictionPrompt(ctx *PredictionContext) (sys
 触发任意一条 → probability ≤ 0.65，expected_move ≤ ±2%：
 【做多警告】
 - RSI7 > 70 或 RSI14 > 68
-- 1h涨幅 > 3%
-- p > EMA20 + 2%
+- 1h涨幅 > 2%                            # 降低阈值以匹配实际波动
+- p > EMA20 + 1.5%                       # 降低阈值以匹配实际波动
 
 【做空警告】
 - RSI7 < 35 或 RSI14 < 35
-- 1h跌幅 < -3%
-- p < EMA20 - 2%
+- 1h跌幅 < -2%                           # 降低阈值以匹配实际波动
+- p < EMA20 - 1.5%                       # 降低阈值以匹配实际波动
 
 同时触发 ≥2 条 → 倾向 neutral 或 probability=0.58~0.62
 

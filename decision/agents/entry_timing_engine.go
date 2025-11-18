@@ -441,11 +441,11 @@ func (e *EntryTimingEngine) buildRejectReason(direction string, md *market.Data)
 		if rsi7 > 75 {
 			reasons = append(reasons, fmt.Sprintf("RSI7=%.1f严重超买(>75)", rsi7))
 		}
-		if priceChange1h > 6.0 {
-			reasons = append(reasons, fmt.Sprintf("1h涨幅%.2f%%极端追高(>6%%)", priceChange1h))
+		if priceChange1h > 4.0 {
+			reasons = append(reasons, fmt.Sprintf("1h涨幅%.2f%%极端追高(>4%%)", priceChange1h))
 		}
-		if priceToEMA > 4.0 {
-			reasons = append(reasons, fmt.Sprintf("价格高于EMA20达%.1f%%(>4%%)", priceToEMA))
+		if priceToEMA > 3.0 {
+			reasons = append(reasons, fmt.Sprintf("价格高于EMA20达%.1f%%(>3%%)", priceToEMA))
 		}
 	} else if direction == "down" {
 		// 做空拒绝原因（统一阈值35）
@@ -458,11 +458,11 @@ func (e *EntryTimingEngine) buildRejectReason(direction string, md *market.Data)
 		if macd > macdSignal && rsi14 < 55 {
 			reasons = append(reasons, fmt.Sprintf("MACD金叉(%.2f>%.2f)且RSI14=%.1f", macd, macdSignal, rsi14))
 		}
-		if priceChange1h < -5.0 {
-			reasons = append(reasons, fmt.Sprintf("1h跌幅%.2f%%急跌(<-5%%)", priceChange1h))
+		if priceChange1h < -3.0 {
+			reasons = append(reasons, fmt.Sprintf("1h跌幅%.2f%%急跌(<-3%%)", priceChange1h))
 		}
-		if priceToEMA < -4.0 {
-			reasons = append(reasons, fmt.Sprintf("价格低于EMA20达%.1f%%(<-4%%)", priceToEMA))
+		if priceToEMA < -2.0 {
+			reasons = append(reasons, fmt.Sprintf("价格低于EMA20达%.1f%%(<-2%%)", priceToEMA))
 		}
 	}
 
