@@ -824,6 +824,12 @@ func (o *DecisionOrchestrator) validateRiskParameters(
 	var stopDistancePct, tpDistancePct float64
 	var stopMultiple, tpMultiple float64
 
+	// 预先声明验证所需的变量（避免goto跳过声明）
+	stopMin := MinStopMultiple * (1.0 - RRFloatTolerance) // 4.5 * 0.95 = 4.275
+	stopMax := MaxStopMultiple * (1.0 + RRFloatTolerance) // 25.0 * 1.05 = 26.25
+	tpMin := MinTPMultiple * (1.0 - RRFloatTolerance)     // 9.0 * 0.95 = 8.55
+	tpMax := MaxTPMultiple * (1.0 + RRFloatTolerance)     // 30.0 * 1.05 = 31.5
+
 	// 🔧 修复：direction参数是"up"/"down"，而不是"long"/"short"
 	if direction == "up" || direction == "long" {
 		stopDistancePct = (currentPrice - stopLoss) / currentPrice * 100
@@ -859,14 +865,14 @@ func (o *DecisionOrchestrator) validateRiskParameters(
 		goto checkRiskReward
 	}
 
-	// 🚨 检查止损是否在ATR合理范围内 [2.0-25.0倍]
-	if stopMultiple < MinStopMultiple || stopMultiple > MaxStopMultiple {
+	// 🚨 检查止损是否在ATR合理范围内 [4.5-25.0倍]（带浮点容差）
+	if stopMultiple < stopMin || stopMultiple > stopMax {
 		return fmt.Errorf("止损倍数%.2fx超出合理范围[%.1f-%.1f]ATR（止损%.2f%%, ATR%%=%.2f%%）",
 			stopMultiple, MinStopMultiple, MaxStopMultiple, stopDistancePct, atrPct)
 	}
 
-	// 🚨 检查止盈是否在ATR合理范围内 [3.0-30.0倍]
-	if tpMultiple < MinTPMultiple || tpMultiple > MaxTPMultiple {
+	// 🚨 检查止盈是否在ATR合理范围内 [9.0-30.0倍]（带浮点容差）
+	if tpMultiple < tpMin || tpMultiple > tpMax {
 		return fmt.Errorf("止盈倍数%.2fx超出合理范围[%.1f-%.1f]ATR（止盈%.2f%%, ATR%%=%.2f%%）",
 			tpMultiple, MinTPMultiple, MaxTPMultiple, tpDistancePct, atrPct)
 	}
