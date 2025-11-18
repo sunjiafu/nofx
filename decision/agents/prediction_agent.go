@@ -175,13 +175,15 @@ func (agent *PredictionAgent) buildPredictionPrompt(ctx *PredictionContext) (sys
 4. 市场情绪参考（资金费率、OI变化、情绪指数）
 
 ✅ **必须遵守的决策逻辑**：
-- 账户浮亏 > 5% → 概率必须 ≤ 0.60，倾向neutral或降低风险
-- 账户浮亏 2-5% → 新机会概率需 ≥ 0.70
-- 持仓已满(3/3) → 新机会概率必须 > 0.80
-- 保证金占用 > 60% → 严禁看涨方向，倾向neutral
-- 保证金占用 > 40% → 降低预期收益(expected_move ≤ 2%)
-- 持仓有大幅盈利(>5%) → 考虑建议部分止盈（在reasoning中提示）
-- 持仓严重亏损(<-5%) → 考虑止损或观望（降低概率到0.55-0.60）
+- 账户浮亏 > 8% → 🛑 停止新开仓，倾向neutral（prob=0.50-0.55）
+- 账户浮亏 5-8% → ⚠️ 新开仓概率必须 ≥ 0.75，且优先考虑与持仓对冲
+- 账户浮亏 2-5% → ⚠️ 新开仓概率必须 ≥ 0.70
+- 账户浮亏 < 2% → ✅ 正常开仓（概率 ≥ 0.65）
+- 持仓已满(3/3) → 🔒 新机会概率必须 > 0.80
+- 保证金占用 > 60% → 🛑 严禁新开仓，倾向neutral
+- 保证金占用 > 40% → ⚠️ 降低预期收益(expected_move ≤ 2%)
+- 持仓有大幅盈利(>5%) → ✅ 考虑建议部分止盈（在reasoning中提示）
+- 单个持仓亏损 > 5% → ⚠️ 考虑止损（在reasoning中提示）
 
 📊 **持仓方向冲突处理**：
 - 已有多单且预测down → 如盈利>3%建议平仓，否则neutral观望
@@ -490,14 +492,18 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 			sb.WriteString("\n⚠️ 决策要求:\n")
 
 			// 根据持仓盈亏给出建议
-			if totalUnrealizedPnLPct < -5 {
-				sb.WriteString("- 🚨 账户浮亏 > 5%，优先考虑减仓或止损，避免扩大亏损\n")
-				sb.WriteString("- 新开仓必须有 > 75% 概率且与现有持仓风险对冲\n")
+			if totalUnrealizedPnLPct < -8 {
+				sb.WriteString("- 🛑 账户浮亏 > 8%，停止新开仓，倾向neutral（概率0.50-0.55）\n")
+				sb.WriteString("- 优先减仓或止损，避免进一步扩大亏损\n")
+			} else if totalUnrealizedPnLPct < -5 {
+				sb.WriteString("- 🚨 账户浮亏5-8%，新开仓概率必须 ≥ 0.75\n")
+				sb.WriteString("- 优先考虑与现有持仓风险对冲的方向\n")
+				sb.WriteString("- 检查亏损持仓是否需要止损\n")
 			} else if totalUnrealizedPnLPct < -2 {
-				sb.WriteString("- ⚠️ 账户有浮亏，新机会需要 > 70% 概率\n")
-				sb.WriteString("- 检查亏损持仓是否需要止损或调整\n")
+				sb.WriteString("- ⚠️ 账户浮亏2-5%，新开仓概率必须 ≥ 0.70\n")
+				sb.WriteString("- 检查亏损持仓是否需要调整或止损\n")
 			} else if totalUnrealizedPnLPct > 5 {
-				sb.WriteString("- ✅ 账户有盈利，可考虑部分止盈锁定利润\n")
+				sb.WriteString("- ✅ 账户盈利 > 5%，可考虑部分止盈锁定利润\n")
 				sb.WriteString("- 检查盈利持仓是否达到移动止损条件\n")
 			}
 
