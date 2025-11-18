@@ -8,9 +8,9 @@ const (
 	ATRPctMid     = 4.0 // <4.0% = 中波动, >=4.0% = 高波动
 
 	// === 止损止盈倍数范围 ===
-	MinStopMultiple = 2.0  // 最小止损倍数（xATR）
+	MinStopMultiple = 4.5  // 最小止损倍数（xATR）- 从2.0放宽到4.5，给市场波动留出空间
 	MaxStopMultiple = 25.0 // 最大止损倍数（xATR） - 放宽以支持低波动市场
-	MinTPMultiple   = 3.0  // 最小止盈倍数（xATR） - 降低以适应低波动
+	MinTPMultiple   = 9.0  // 最小止盈倍数（xATR）- 从3.0调整到9.0，保持2:1风险回报比
 	MaxTPMultiple   = 30.0 // 最大止盈倍数（xATR） - 同步放宽
 
 	// === 风险回报比要求 ===
