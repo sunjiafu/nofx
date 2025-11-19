@@ -148,6 +148,13 @@ type Data struct {
 	FundingRate       float64
 	IntradaySeries    *IntradayData
 	LongerTermContext *LongerTermData
+
+	// 🎯 支撑位/阻力位（用于限价单定价）
+	NearestSupport    float64   // 最近支撑位（距当前价最近的下方价格水平）
+	NearestResistance float64   // 最近阻力位（距当前价最近的上方价格水平）
+	SupportLevels     []float64 // 多个支撑位（按距离当前价从近到远排序）
+	ResistanceLevels  []float64 // 多个阻力位（按距离当前价从近到远排序）
+
 	Timestamp         int64 // 最新K线收盘时间（Unix秒）
 }
 
@@ -266,6 +273,9 @@ func computeMarketData(symbol string) (*Data, error) {
 	intradayData := calculateIntradaySeries(confirmedKlines)
 	longerTermData := calculateLongerTermData(confirmedKlines)
 
+	// 🎯 计算支撑位/阻力位（用于限价单定价）
+	nearestSupport, nearestResistance, supportLevels, resistanceLevels := calculateSupportResistance(confirmedKlines, currentPrice)
+
 	result := &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice, // 实时价格（前端显示用）
@@ -287,6 +297,13 @@ func computeMarketData(symbol string) (*Data, error) {
 		FundingRate:       fundingRate,
 		IntradaySeries:    intradayData,
 		LongerTermContext: longerTermData,
+
+		// 🎯 支撑位/阻力位
+		NearestSupport:    nearestSupport,
+		NearestResistance: nearestResistance,
+		SupportLevels:     supportLevels,
+		ResistanceLevels:  resistanceLevels,
+
 		Timestamp:         confirmedKlines[len(confirmedKlines)-1].CloseTime / 1000, // 使用最后一根已确认K线的时间
 	}
 
@@ -1102,5 +1119,189 @@ func calculate24hVolume(klines []Kline, targetMinutes, intervalMinutes int) floa
 
 	avgPrice = avgPrice / float64(barsNeeded)
 	return totalVolume * avgPrice
+}
+
+// ==================== 支撑位/阻力位检测 ====================
+
+// PriceLevel 价格水平（支撑位或阻力位）
+type PriceLevel struct {
+	Price      float64 // 价格水平
+	TouchCount int     // 触及次数（越多越重要）
+	IsSupport  bool    // true=支撑位, false=阻力位
+}
+
+// calculateSupportResistance 计算支撑位和阻力位
+// 基于Swing Highs/Lows算法：识别局部高点和低点，聚类成价格水平
+func calculateSupportResistance(klines []Kline, currentPrice float64) (nearestSupport, nearestResistance float64, supportLevels, resistanceLevels []float64) {
+	if len(klines) < 10 {
+		return 0, 0, nil, nil
+	}
+
+	// 🎯 第一步：识别Swing Highs和Swing Lows
+	// Swing High: 中心K线的High > 前后各2根K线的High
+	// Swing Low:  中心K线的Low < 前后各2根K线的Low
+	swingWindow := 2 // 前后各2根K线
+	var swingHighs []float64
+	var swingLows []float64
+
+	// 遍历K线寻找Swing Points（跳过前后各swingWindow根K线）
+	for i := swingWindow; i < len(klines)-swingWindow; i++ {
+		// 检查是否是Swing High
+		isSwingHigh := true
+		for j := i - swingWindow; j <= i+swingWindow; j++ {
+			if j != i && klines[j].High >= klines[i].High {
+				isSwingHigh = false
+				break
+			}
+		}
+		if isSwingHigh {
+			swingHighs = append(swingHighs, klines[i].High)
+		}
+
+		// 检查是否是Swing Low
+		isSwingLow := true
+		for j := i - swingWindow; j <= i+swingWindow; j++ {
+			if j != i && klines[j].Low <= klines[i].Low {
+				isSwingLow = false
+				break
+			}
+		}
+		if isSwingLow {
+			swingLows = append(swingLows, klines[i].Low)
+		}
+	}
+
+	// 🎯 第二步：将价格接近的点聚类成价格水平
+	// 聚类阈值：0.5%的价格差异视为同一水平
+	clusterThreshold := currentPrice * 0.005
+
+	// 聚类Swing Highs成阻力位
+	resistanceClusters := clusterPriceLevels(swingHighs, clusterThreshold, false)
+
+	// 聚类Swing Lows成支撑位
+	supportClusters := clusterPriceLevels(swingLows, clusterThreshold, true)
+
+	// 🎯 第三步：找出距离当前价最近的支撑位和阻力位
+	nearestSupport = findNearestLevel(supportClusters, currentPrice, true)
+	nearestResistance = findNearestLevel(resistanceClusters, currentPrice, false)
+
+	// 🎯 第四步：返回排序后的支撑位和阻力位列表（按距离当前价从近到远）
+	supportLevels = extractSortedLevels(supportClusters, currentPrice, true)
+	resistanceLevels = extractSortedLevels(resistanceClusters, currentPrice, false)
+
+	return nearestSupport, nearestResistance, supportLevels, resistanceLevels
+}
+
+// clusterPriceLevels 将价格点聚类成价格水平
+func clusterPriceLevels(prices []float64, threshold float64, isSupport bool) []PriceLevel {
+	if len(prices) == 0 {
+		return nil
+	}
+
+	var clusters []PriceLevel
+
+	for _, price := range prices {
+		// 查找是否有接近的cluster
+		foundCluster := false
+		for i := range clusters {
+			if math.Abs(price-clusters[i].Price) <= threshold {
+				// 找到接近的cluster，更新价格（加权平均）和触及次数
+				clusters[i].Price = (clusters[i].Price*float64(clusters[i].TouchCount) + price) / float64(clusters[i].TouchCount+1)
+				clusters[i].TouchCount++
+				foundCluster = true
+				break
+			}
+		}
+
+		// 如果没有找到接近的cluster，创建新cluster
+		if !foundCluster {
+			clusters = append(clusters, PriceLevel{
+				Price:      price,
+				TouchCount: 1,
+				IsSupport:  isSupport,
+			})
+		}
+	}
+
+	// 按触及次数排序（触及越多越重要）
+	// 使用简单的冒泡排序
+	for i := 0; i < len(clusters)-1; i++ {
+		for j := i + 1; j < len(clusters); j++ {
+			if clusters[j].TouchCount > clusters[i].TouchCount {
+				clusters[i], clusters[j] = clusters[j], clusters[i]
+			}
+		}
+	}
+
+	return clusters
+}
+
+// findNearestLevel 找到距离当前价最近的支撑位或阻力位
+func findNearestLevel(levels []PriceLevel, currentPrice float64, isSupport bool) float64 {
+	if len(levels) == 0 {
+		return 0
+	}
+
+	nearestPrice := 0.0
+	minDistance := math.MaxFloat64
+
+	for _, level := range levels {
+		// 支撑位必须在当前价下方，阻力位必须在当前价上方
+		if isSupport && level.Price >= currentPrice {
+			continue
+		}
+		if !isSupport && level.Price <= currentPrice {
+			continue
+		}
+
+		distance := math.Abs(currentPrice - level.Price)
+		if distance < minDistance {
+			minDistance = distance
+			nearestPrice = level.Price
+		}
+	}
+
+	return nearestPrice
+}
+
+// extractSortedLevels 提取价格水平列表（按距离当前价从近到远排序）
+func extractSortedLevels(levels []PriceLevel, currentPrice float64, isSupport bool) []float64 {
+	if len(levels) == 0 {
+		return nil
+	}
+
+	// 筛选有效的水平（支撑在下方，阻力在上方）
+	var validLevels []PriceLevel
+	for _, level := range levels {
+		if isSupport && level.Price < currentPrice {
+			validLevels = append(validLevels, level)
+		} else if !isSupport && level.Price > currentPrice {
+			validLevels = append(validLevels, level)
+		}
+	}
+
+	// 按距离当前价排序（从近到远）
+	for i := 0; i < len(validLevels)-1; i++ {
+		for j := i + 1; j < len(validLevels); j++ {
+			distI := math.Abs(currentPrice - validLevels[i].Price)
+			distJ := math.Abs(currentPrice - validLevels[j].Price)
+			if distJ < distI {
+				validLevels[i], validLevels[j] = validLevels[j], validLevels[i]
+			}
+		}
+	}
+
+	// 提取价格（最多返回前5个）
+	maxLevels := 5
+	if len(validLevels) > maxLevels {
+		validLevels = validLevels[:maxLevels]
+	}
+
+	result := make([]float64, len(validLevels))
+	for i, level := range validLevels {
+		result[i] = level.Price
+	}
+
+	return result
 }
 

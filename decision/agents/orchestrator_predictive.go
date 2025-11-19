@@ -391,13 +391,10 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 						log.Printf("📝 [%s] 限价单(回调): 等待%.4f (当前%.4f): %s",
 							vp.symbol, limitPrice, entryDecision.CurrentPrice, entryDecision.Reasoning)
 					} else {
-						// 立即入场时机：使用动态计算的限价单价格（基于ATR波动率和AI置信度）
-						currentPrice := marketData.CurrentPrice
-						atrPct := (marketData.LongerTermContext.ATR14 / currentPrice) * 100
+						// 立即入场时机：使用动态计算的限价单价格（优先支撑位/阻力位，否则ATR-based）
 						var pullbackPct float64
 						limitPrice, pullbackPct = calculateDynamicLimitPrice(
-							currentPrice,
-							atrPct,
+							marketData,
 							vp.prediction.Direction,
 							vp.prediction.Confidence,
 						)
@@ -407,10 +404,12 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 							directionSymbol = "⬆️"
 						}
 
-						cotBuilder.WriteString(fmt.Sprintf("**%s**: 📋 限价单 - 即时价格%.4f（当前%.4f）| 回调: %.2f%% %s (ATR%%=%.2f%%, 置信度=%s)\n",
-							vp.symbol, limitPrice, currentPrice, pullbackPct, directionSymbol, atrPct, vp.prediction.Confidence))
-						log.Printf("📝 [%s] 限价单(即时): %.4f (当前%.4f) | 回调%.2f%% | ATR%%=%.2f%% 置信度=%s",
-							vp.symbol, limitPrice, currentPrice, pullbackPct, atrPct, vp.prediction.Confidence)
+						currentPrice := marketData.CurrentPrice
+
+						cotBuilder.WriteString(fmt.Sprintf("**%s**: 📋 限价单 - 限价%.4f（当前%.4f）| 回调: %.2f%% %s (置信度=%s)\n",
+							vp.symbol, limitPrice, currentPrice, pullbackPct, directionSymbol, vp.prediction.Confidence))
+						log.Printf("📝 [%s] 限价单(动态): %.4f (当前%.4f) | 回调%.2f%% | 置信度=%s",
+							vp.symbol, limitPrice, currentPrice, pullbackPct, vp.prediction.Confidence)
 					}
 				} else if entryDecision.Strategy == "wait_pullback" {
 					// 非全局限价单模式：仅在需要等待回调时使用限价单
@@ -1086,14 +1085,57 @@ func validateEntryTiming_DEPRECATED(direction string, md *market.Data) error {
 	return fmt.Errorf("未知方向: %s", positionDirection)
 }
 
-// calculateDynamicLimitPrice 基于ATR波动率和AI置信度动态计算限价单价格
+// calculateDynamicLimitPrice 基于支撑位/阻力位（优先）或ATR波动率计算限价单价格
+// 优先使用支撑位/阻力位作为限价单目标，如果不可用则回退到ATR-based计算
 // 返回限价单价格和回调百分比
 func calculateDynamicLimitPrice(
-	currentPrice float64,
-	atrPct float64,
+	marketData *market.Data,
 	direction string, // "up" or "down"
 	confidence string, // "low", "medium", "high", "very_high"
 ) (limitPrice float64, pullbackPct float64) {
+	currentPrice := marketData.CurrentPrice
+	atrPct := (marketData.LongerTermContext.ATR14 / currentPrice) * 100
+
+	// 🎯 第一优先级：尝试使用支撑位/阻力位作为限价单目标
+	var useSupportResistance bool
+	var srLevel float64
+	var srType string
+
+	if direction == "up" {
+		// 做多：优先使用支撑位（买在支撑位附近）
+		if marketData.NearestSupport > 0 {
+			distancePct := ((currentPrice - marketData.NearestSupport) / currentPrice) * 100
+			// 支撑位必须在当前价下方，且在合理范围内（0.3%-2.0%）
+			if distancePct >= 0.3 && distancePct <= 2.0 {
+				useSupportResistance = true
+				srLevel = marketData.NearestSupport
+				srType = "支撑位"
+				pullbackPct = distancePct
+			}
+		}
+	} else {
+		// 做空：优先使用阻力位（卖在阻力位附近）
+		if marketData.NearestResistance > 0 {
+			distancePct := ((marketData.NearestResistance - currentPrice) / currentPrice) * 100
+			// 阻力位必须在当前价上方，且在合理范围内（0.3%-2.0%）
+			if distancePct >= 0.3 && distancePct <= 2.0 {
+				useSupportResistance = true
+				srLevel = marketData.NearestResistance
+				srType = "阻力位"
+				pullbackPct = distancePct
+			}
+		}
+	}
+
+	if useSupportResistance {
+		// ✅ 使用支撑位/阻力位作为限价单目标
+		limitPrice = srLevel
+		log.Printf("🎯 限价单定价(支撑阻力): %s=%.4f (距当前价%.4f 回调%.2f%%) | ATR%%=%.2f%% 置信度=%s",
+			srType, srLevel, currentPrice, pullbackPct, atrPct, confidence)
+		return limitPrice, pullbackPct
+	}
+
+	// 🔄 第二优先级：支撑位/阻力位不可用，回退到ATR-based动态计算
 	// 🎯 基于ATR%确定基础回调幅度
 	var baseOffset float64
 
@@ -1136,7 +1178,7 @@ func calculateDynamicLimitPrice(
 		limitPrice = currentPrice * (1.0 + pullbackPct/100.0)
 	}
 
-	log.Printf("📐 动态限价计算: ATR%%=%.2f%% (基础回调%.2f%%) × 置信度%s (系数%.1f) = 最终回调%.2f%% | 当前价%.4f → 限价%.4f",
+	log.Printf("📐 限价单定价(ATR动态): ATR%%=%.2f%% (基础回调%.2f%%) × 置信度%s (系数%.1f) = 最终回调%.2f%% | 当前价%.4f → 限价%.4f",
 		atrPct, baseOffset, confidence, confidenceMultiplier, pullbackPct, currentPrice, limitPrice)
 
 	return limitPrice, pullbackPct
