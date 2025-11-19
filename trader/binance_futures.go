@@ -1265,9 +1265,9 @@ func (t *FuturesTrader) GetOrderStatus(symbol string, orderID int64) (map[string
 	result := make(map[string]interface{})
 	result["orderId"] = order.OrderID
 	result["symbol"] = order.Symbol
-	result["status"] = order.Status
-	result["side"] = order.Side
-	result["type"] = order.Type
+	result["status"] = string(order.Status) // 🔧 修复：转换枚举为字符串
+	result["side"] = string(order.Side)     // 🔧 修复：转换枚举为字符串
+	result["type"] = string(order.Type)     // 🔧 修复：转换枚举为字符串
 	result["price"], _ = strconv.ParseFloat(order.Price, 64)
 	result["origQty"], _ = strconv.ParseFloat(order.OrigQuantity, 64)
 	result["executedQty"], _ = strconv.ParseFloat(order.ExecutedQuantity, 64)

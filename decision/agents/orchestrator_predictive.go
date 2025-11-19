@@ -391,17 +391,26 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 						log.Printf("📝 [%s] 限价单(回调): 等待%.4f (当前%.4f): %s",
 							vp.symbol, limitPrice, entryDecision.CurrentPrice, entryDecision.Reasoning)
 					} else {
-						// 立即入场时机：使用略低于/高于当前价的限价单（提高成交率）
+						// 立即入场时机：使用动态计算的限价单价格（基于ATR波动率和AI置信度）
 						currentPrice := marketData.CurrentPrice
-						if vp.prediction.Direction == "up" {
-							limitPrice = currentPrice * 0.999 // 做多：低于当前价0.1%
-						} else {
-							limitPrice = currentPrice * 1.001 // 做空：高于当前价0.1%
+						atrPct := (marketData.LongerTermContext.ATR14 / currentPrice) * 100
+						var pullbackPct float64
+						limitPrice, pullbackPct = calculateDynamicLimitPrice(
+							currentPrice,
+							atrPct,
+							vp.prediction.Direction,
+							vp.prediction.Confidence,
+						)
+
+						directionSymbol := "⬇️"
+						if vp.prediction.Direction == "down" {
+							directionSymbol = "⬆️"
 						}
-						cotBuilder.WriteString(fmt.Sprintf("**%s**: 📋 限价单 - 即时价格%.4f（当前%.4f）\n",
-							vp.symbol, limitPrice, currentPrice))
-						log.Printf("📝 [%s] 限价单(即时): %.4f (当前%.4f)",
-							vp.symbol, limitPrice, currentPrice)
+
+						cotBuilder.WriteString(fmt.Sprintf("**%s**: 📋 限价单 - 即时价格%.4f（当前%.4f）| 回调: %.2f%% %s (ATR%%=%.2f%%, 置信度=%s)\n",
+							vp.symbol, limitPrice, currentPrice, pullbackPct, directionSymbol, atrPct, vp.prediction.Confidence))
+						log.Printf("📝 [%s] 限价单(即时): %.4f (当前%.4f) | 回调%.2f%% | ATR%%=%.2f%% 置信度=%s",
+							vp.symbol, limitPrice, currentPrice, pullbackPct, atrPct, vp.prediction.Confidence)
 					}
 				} else if entryDecision.Strategy == "wait_pullback" {
 					// 非全局限价单模式：仅在需要等待回调时使用限价单
@@ -1076,4 +1085,61 @@ func validateEntryTiming_DEPRECATED(direction string, md *market.Data) error {
 
 	return fmt.Errorf("未知方向: %s", positionDirection)
 }
+
+// calculateDynamicLimitPrice 基于ATR波动率和AI置信度动态计算限价单价格
+// 返回限价单价格和回调百分比
+func calculateDynamicLimitPrice(
+	currentPrice float64,
+	atrPct float64,
+	direction string, // "up" or "down"
+	confidence string, // "low", "medium", "high", "very_high"
+) (limitPrice float64, pullbackPct float64) {
+	// 🎯 基于ATR%确定基础回调幅度
+	var baseOffset float64
+
+	if atrPct < 1.0 {
+		// 低波动（ATR% < 1.0%）：使用较小回调
+		baseOffset = 0.15 // 0.15%
+	} else if atrPct < 2.5 {
+		// 中波动（1.0% <= ATR% < 2.5%）：标准回调
+		baseOffset = 0.25 // 0.25%
+	} else if atrPct < 4.0 {
+		// 高波动（2.5% <= ATR% < 4.0%）：加大回调
+		baseOffset = 0.35 // 0.35%
+	} else {
+		// 极高波动（ATR% >= 4.0%）：最大回调
+		baseOffset = 0.50 // 0.50%
+	}
+
+	// 🚀 根据置信度调整（置信度越高 = 越紧急 = 回调幅度越小）
+	var confidenceMultiplier float64
+	switch confidence {
+	case "very_high":
+		confidenceMultiplier = 0.6 // 极高置信度：快速成交，减少40%回调
+	case "high":
+		confidenceMultiplier = 0.8 // 高置信度：较快成交，减少20%回调
+	case "medium":
+		confidenceMultiplier = 1.0 // 中等置信度：标准回调
+	default: // "low"
+		confidenceMultiplier = 1.2 // 低置信度：耐心等待，增加20%回调
+	}
+
+	// 📊 最终回调百分比 = 基础回调 × 置信度系数
+	pullbackPct = baseOffset * confidenceMultiplier
+
+	// 💰 计算限价单价格
+	if direction == "up" {
+		// 做多：买在比当前价低的位置
+		limitPrice = currentPrice * (1.0 - pullbackPct/100.0)
+	} else {
+		// 做空：卖在比当前价高的位置
+		limitPrice = currentPrice * (1.0 + pullbackPct/100.0)
+	}
+
+	log.Printf("📐 动态限价计算: ATR%%=%.2f%% (基础回调%.2f%%) × 置信度%s (系数%.1f) = 最终回调%.2f%% | 当前价%.4f → 限价%.4f",
+		atrPct, baseOffset, confidence, confidenceMultiplier, pullbackPct, currentPrice, limitPrice)
+
+	return limitPrice, pullbackPct
+}
+
 
