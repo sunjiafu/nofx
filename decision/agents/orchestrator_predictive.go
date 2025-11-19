@@ -153,6 +153,15 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 			// 确保预测的symbol与当前持仓一致（防止AI默认返回BTC）
 			prediction.Symbol = pos.Symbol
 
+			// 🔧 应用AI校准：基于历史准确率调整概率
+			originalProb := prediction.Probability
+			calibratedProb := predTracker.CalibrateProbability(pos.Symbol, prediction.Probability)
+			if calibratedProb != originalProb {
+				log.Printf("📊 [%s] AI概率校准: %.0f%% → %.0f%% (校准因子基于历史准确率)",
+					pos.Symbol, originalProb*100, calibratedProb*100)
+				prediction.Probability = calibratedProb
+			}
+
 			cotBuilder.WriteString(fmt.Sprintf("**%s %s持仓预测**:\n", pos.Symbol, strings.ToUpper(pos.Side)))
 			cotBuilder.WriteString(fmt.Sprintf("  预测方向: %s | 概率: %.0f%% | 预期幅度: %+.2f%%\n",
 				prediction.Direction, prediction.Probability*100, prediction.ExpectedMove))
@@ -262,6 +271,15 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 			// 确保预测使用当前币种，避免AI返回默认BTC
 			prediction.Symbol = coin.Symbol
 
+			// 🔧 应用AI校准：基于历史准确率调整概率
+			originalProb := prediction.Probability
+			calibratedProb := predTracker.CalibrateProbability(coin.Symbol, prediction.Probability)
+			if calibratedProb != originalProb {
+				log.Printf("📊 [%s] AI概率校准: %.0f%% → %.0f%% (校准因子基于历史准确率)",
+					coin.Symbol, originalProb*100, calibratedProb*100)
+				prediction.Probability = calibratedProb
+			}
+
 			cotBuilder.WriteString(fmt.Sprintf("**%s预测**:\n", coin.Symbol))
 			cotBuilder.WriteString(fmt.Sprintf("  方向: %s | 概率: %.0f%% | 预期幅度: %+.2f%% | 时间: %s\n",
 				prediction.Direction, prediction.Probability*100, prediction.ExpectedMove, prediction.Timeframe))
@@ -295,8 +313,12 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 				prediction.Confidence == "very_high" ||
 				(allowMediumConf && prediction.Confidence == "medium")
 
+			// 🆕 跟踪拒绝原因（用于记录所有预测）
+			var rejectReason string
+
 			if accountRiskViolation != "" {
 				// 账户风控不通过，强制拒绝
+				rejectReason = accountRiskViolation
 				cotBuilder.WriteString(fmt.Sprintf("  × %s\n\n", accountRiskViolation))
 			} else if prediction.Probability >= requiredMinProb && meetsConfidence && prediction.Direction != "neutral" {
 				cotBuilder.WriteString(fmt.Sprintf("  ✓ 满足开仓条件（概率%.0f%% >= %.0f%% 且 置信度%s）\n",
@@ -315,22 +337,33 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 			} else {
 				// 详细说明不满足的原因
 				if prediction.Direction == "neutral" {
+					rejectReason = "方向neutral，不开仓"
 					cotBuilder.WriteString(fmt.Sprintf("  × 方向neutral，不开仓\n\n"))
 				} else if prediction.Probability < requiredMinProb {
 					if accountTotalPnLPct < -5 {
-						cotBuilder.WriteString(fmt.Sprintf("  × 概率%.0f%% < 风控要求%.0f%% (账户亏损%.2f%%)\n\n",
-							prediction.Probability*100, requiredMinProb*100, accountTotalPnLPct))
+						rejectReason = fmt.Sprintf("概率%.0f%% < 风控要求%.0f%% (账户亏损%.2f%%)",
+							prediction.Probability*100, requiredMinProb*100, accountTotalPnLPct)
+						cotBuilder.WriteString(fmt.Sprintf("  × %s\n\n", rejectReason))
 					} else {
-						cotBuilder.WriteString(fmt.Sprintf("  × 概率%.0f%% < 阈值%.0f%% (夏普调整)\n\n",
-							prediction.Probability*100, requiredMinProb*100))
+						rejectReason = fmt.Sprintf("概率%.0f%% < 阈值%.0f%% (夏普调整)",
+							prediction.Probability*100, requiredMinProb*100)
+						cotBuilder.WriteString(fmt.Sprintf("  × %s\n\n", rejectReason))
 					}
 				} else if !meetsConfidence {
-					cotBuilder.WriteString(fmt.Sprintf("  × 置信度%s不满足要求 (需要high", prediction.Confidence))
 					if allowMediumConf {
-						cotBuilder.WriteString(" 或 medium)\n\n")
+						rejectReason = fmt.Sprintf("置信度%s不满足要求 (需要high或medium)", prediction.Confidence)
 					} else {
-						cotBuilder.WriteString(")\n\n")
+						rejectReason = fmt.Sprintf("置信度%s不满足要求 (需要high)", prediction.Confidence)
 					}
+					cotBuilder.WriteString(fmt.Sprintf("  × %s\n\n", rejectReason))
+				}
+			}
+
+			// 🆕 记录所有预测（初筛阶段被拒绝的）
+			// 如果有拒绝原因，立即记录；通过初筛的会在后续流程中记录
+			if rejectReason != "" {
+				if err := predTracker.RecordAll(prediction, marketData.CurrentPrice, false, rejectReason); err != nil {
+					log.Printf("⚠️  记录预测失败: %v", err)
 				}
 			}
 		}
@@ -342,9 +375,37 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 			opened := 0
 			remainingBalance := ctx.Account.AvailableBalance
 
+			// 🔧 每次决策周期最多开1个新仓位（保守策略，确保质量>数量）
+			maxNewPositionsPerCycle := 1
+
 			for _, vp := range validPredictions {
+				if opened >= maxNewPositionsPerCycle {
+					cotBuilder.WriteString(fmt.Sprintf("⚠️  已达到单次决策开仓限制（%d个），剩余%d个候选机会将在下次决策时评估\n",
+						maxNewPositionsPerCycle, len(validPredictions)-opened))
+					// 🆕 记录因开仓限制而未执行的预测
+					for i := opened; i < len(validPredictions); i++ {
+						remainingVP := validPredictions[i]
+						if md, ok := ctx.MarketDataMap[remainingVP.symbol]; ok {
+							if recErr := predTracker.RecordAll(remainingVP.prediction, md.CurrentPrice, false, fmt.Sprintf("开仓限制（本周期最多%d个）", maxNewPositionsPerCycle)); recErr != nil {
+								log.Printf("⚠️  记录预测失败: %v", recErr)
+							}
+						}
+					}
+					break
+				}
+
+				// 同时检查总持仓上限
 				if opened >= availableSlots {
-					cotBuilder.WriteString("⚠️  可开仓数量已耗尽\n")
+					cotBuilder.WriteString("⚠️  总持仓已满\n")
+					// 🆕 记录因持仓上限而未执行的预测
+					for i := opened; i < len(validPredictions); i++ {
+						remainingVP := validPredictions[i]
+						if md, ok := ctx.MarketDataMap[remainingVP.symbol]; ok {
+							if recErr := predTracker.RecordAll(remainingVP.prediction, md.CurrentPrice, false, "总持仓已满"); recErr != nil {
+								log.Printf("⚠️  记录预测失败: %v", recErr)
+							}
+						}
+					}
 					break
 				}
 
@@ -355,6 +416,10 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 
 				if err != nil {
 					cotBuilder.WriteString(fmt.Sprintf("**%s**: 风险计算失败 - %v\n\n", vp.symbol, err))
+					// 🆕 记录被拒绝的预测（风险计算失败）
+					if recErr := predTracker.RecordAll(vp.prediction, ctx.MarketDataMap[vp.symbol].CurrentPrice, false, fmt.Sprintf("风险计算失败: %v", err)); recErr != nil {
+						log.Printf("⚠️  记录预测失败: %v", recErr)
+					}
 					continue
 				}
 
@@ -363,6 +428,10 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 					stopLoss, takeProfit, leverage)
 				if validationErr != nil {
 					cotBuilder.WriteString(fmt.Sprintf("**%s**: 风控验证失败 - %v\n\n", vp.symbol, validationErr))
+					// 🆕 记录被拒绝的预测（风控验证失败）
+					if recErr := predTracker.RecordAll(vp.prediction, marketData.CurrentPrice, false, fmt.Sprintf("风控验证失败: %v", validationErr)); recErr != nil {
+						log.Printf("⚠️  记录预测失败: %v", recErr)
+					}
 					continue
 				}
 
@@ -372,8 +441,34 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 				if timingErr != nil {
 					cotBuilder.WriteString(fmt.Sprintf("**%s**: 入场时机不佳 - %v\n\n", vp.symbol, timingErr))
 					log.Printf("⏸️  [%s] 入场时机不佳: %v", vp.symbol, timingErr)
+					// 🆕 记录被拒绝的预测（入场时机不佳）
+					if recErr := predTracker.RecordAll(vp.prediction, marketData.CurrentPrice, false, fmt.Sprintf("入场时机不佳: %v", timingErr)); recErr != nil {
+						log.Printf("⚠️  记录预测失败: %v", recErr)
+					}
 					continue
 				}
+
+			// 🆕 Portfolio级别风控验证
+			portfolioRM := NewPortfolioRiskManager()
+			newSide := "long"
+			if vp.prediction.Direction == "down" {
+				newSide = "short"
+			}
+			// 估算新仓位风险
+			riskPercent := math.Abs(vp.prediction.WorstCase)
+			estimatedRisk := positionSize * (riskPercent / 100.0)
+
+			if portfolioErr := portfolioRM.ValidateNewPosition(
+				ctx.Positions, vp.symbol, newSide, estimatedRisk, ctx.Account.TotalEquity,
+			); portfolioErr != nil {
+				cotBuilder.WriteString(fmt.Sprintf("**%s**: Portfolio风控拒绝 - %v\n\n", vp.symbol, portfolioErr))
+				log.Printf("🛡️  [%s] Portfolio风控拒绝: %v", vp.symbol, portfolioErr)
+				// 🆕 记录被拒绝的预测（Portfolio风控拒绝）
+				if recErr := predTracker.RecordAll(vp.prediction, marketData.CurrentPrice, false, fmt.Sprintf("Portfolio风控拒绝: %v", portfolioErr)); recErr != nil {
+					log.Printf("⚠️  记录预测失败: %v", recErr)
+				}
+				continue
+			}
 
 				// 🆕 限价单支持：根据配置和入场时机决定是否使用限价单
 				isLimitOrder := false
@@ -426,6 +521,10 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 				if requiredMargin > remainingBalance {
 					cotBuilder.WriteString(fmt.Sprintf("**%s**: 剩余资金不足（需要%.2f, 剩余%.2f）\n\n",
 						vp.symbol, requiredMargin, remainingBalance))
+					// 🆕 记录被拒绝的预测（资金不足）
+					if recErr := predTracker.RecordAll(vp.prediction, marketData.CurrentPrice, false, fmt.Sprintf("剩余资金不足（需要%.2f, 剩余%.2f）", requiredMargin, remainingBalance)); recErr != nil {
+						log.Printf("⚠️  记录预测失败: %v", recErr)
+					}
 					continue
 				}
 
@@ -451,7 +550,7 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 					confidence = 0
 				}
 
-				riskPercent := math.Abs(vp.prediction.WorstCase)
+				riskPercent = math.Abs(vp.prediction.WorstCase)
 
 				decisions = append(decisions, Decision{
 					Symbol:          vp.symbol,
@@ -472,7 +571,8 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 					CurrentPrice: marketData.CurrentPrice,
 				})
 
-				if err := predTracker.Record(vp.prediction, marketData.CurrentPrice); err != nil {
+				// 🆕 记录已执行的预测
+				if err := predTracker.RecordAll(vp.prediction, marketData.CurrentPrice, true, ""); err != nil {
 					log.Printf("⚠️  记录预测失败: %v", err)
 				}
 
@@ -724,8 +824,10 @@ func (o *DecisionOrchestrator) calculatePositionFromPrediction(
 		return 0, 0, 0, 0, fmt.Errorf("凯利比例为负，不应开仓")
 	}
 
-	// 使用全凯利 - 数学最优解，最大化长期增长率
-	conservativeKelly := kellyFraction * 1.0
+	// 🔧 使用 1/4 凯利 - 保守策略，降低爆仓风险
+	// 全凯利在加密货币市场风险过高（胜率不稳定、黑天鹅事件）
+	// 1/4 凯利可以在保持正期望的同时大幅降低回撤
+	conservativeKelly := kellyFraction * 0.25
 
 	// 计算仓位大小（名义价值）
 	positionSize = totalEquity * conservativeKelly
@@ -893,14 +995,14 @@ func (o *DecisionOrchestrator) validateRiskParameters(
 	// 🔧 v2: 提高阈值从0.3%到0.5%，因为0.31%也是低波动市场
 	if atrPct < 0.5 {
 		// 低波动市场：放宽绝对值范围（允许更小的止损距离）
-		// 止损：1.0-10.0%（正常市场3-10%，低波动市场允许更小）
-		// 止盈：2.0-20.0%（正常市场5-20%，低波动市场允许更小）
-		if stopDistancePct < 1.0 || stopDistancePct > 10.0 {
-			return fmt.Errorf("低波动市场止损%.2f%%超出合理范围[1.0-10.0]%%（ATR仅%.2f%%，豁免倍数检查）",
+		// 止损：0.8-10.0%（降低最小值从1.0%到0.8%，允许BTC当前0.95%止损通过）
+		// 止盈：1.6-20.0%（对应R/R≥2.0的要求）
+		if stopDistancePct < 0.8 || stopDistancePct > 10.0 {
+			return fmt.Errorf("低波动市场止损%.2f%%超出合理范围[0.8-10.0]%%（ATR仅%.2f%%，豁免倍数检查）",
 				stopDistancePct, atrPct)
 		}
-		if tpDistancePct < 2.0 || tpDistancePct > 20.0 {
-			return fmt.Errorf("低波动市场止盈%.2f%%超出合理范围[2.0-20.0]%%（ATR仅%.2f%%，豁免倍数检查）",
+		if tpDistancePct < 1.6 || tpDistancePct > 20.0 {
+			return fmt.Errorf("低波动市场止盈%.2f%%超出合理范围[1.6-20.0]%%（ATR仅%.2f%%，豁免倍数检查）",
 				tpDistancePct, atrPct)
 		}
 		log.Printf("✅ [低波动豁免] ATR=%.2f%% < 0.5%%, 豁免倍数检查，止损%.2f%% 止盈%.2f%% 在绝对值合理范围内",

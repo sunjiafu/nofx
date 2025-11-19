@@ -58,9 +58,13 @@ type PredictionRecord struct {
 	IsCorrect     bool              `json:"is_correct"`     // 方向是否正确
 	Accuracy      float64           `json:"accuracy"`       // 预测准确度(0-1)
 	EvaluatedTime time.Time         `json:"evaluated_time"` // 评估时间
+
+	// 🆕 记录所有预测（包括被拒绝的）
+	Executed     bool   `json:"executed"`      // 是否实际开仓
+	RejectReason string `json:"reject_reason"` // 拒绝原因（如果未执行）
 }
 
-// Record 记录一次预测
+// Record 记录一次预测（已执行的开仓）
 func (pt *PredictionTracker) Record(prediction *types.Prediction, currentPrice float64) error {
 	// 生成唯一ID
 	id := fmt.Sprintf("%s_%d", prediction.Symbol, time.Now().Unix())
@@ -76,6 +80,38 @@ func (pt *PredictionTracker) Record(prediction *types.Prediction, currentPrice f
 		EntryPrice: currentPrice,
 		TargetTime: targetTime,
 		Evaluated:  false,
+		Executed:   true, // 🆕 标记为已执行
+	}
+
+	// 保存到文件
+	filename := filepath.Join(pt.dataDir, fmt.Sprintf("%s.json", id))
+	data, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return ioutil.WriteFile(filename, data, 0644)
+}
+
+// RecordAll 记录所有预测（包括被拒绝的）
+// 用于全面评估AI预测准确率
+func (pt *PredictionTracker) RecordAll(prediction *types.Prediction, currentPrice float64, executed bool, rejectReason string) error {
+	// 生成唯一ID（使用纳秒避免同一秒多个预测冲突）
+	id := fmt.Sprintf("%s_%d_%d", prediction.Symbol, time.Now().Unix(), time.Now().Nanosecond())
+
+	// 计算目标时间
+	targetTime := pt.calculateTargetTime(prediction.Timeframe)
+
+	record := &PredictionRecord{
+		ID:           id,
+		Timestamp:    time.Now(),
+		Symbol:       prediction.Symbol,
+		Prediction:   prediction,
+		EntryPrice:   currentPrice,
+		TargetTime:   targetTime,
+		Evaluated:    false,
+		Executed:     executed,
+		RejectReason: rejectReason,
 	}
 
 	// 保存到文件
@@ -638,4 +674,190 @@ func parseFloat(val interface{}) (float64, error) {
 	default:
 		return 0, fmt.Errorf("无法解析浮点数: %v", val)
 	}
+}
+
+// ==================== AI预测校准系统 ====================
+
+// CalibrationData 校准数据
+type CalibrationData struct {
+	Symbol            string  // 币种
+	SampleSize        int     // 样本数量
+	CalibrationFactor float64 // 校准因子（实际准确率/预测置信度）
+	OverconfidenceBias float64 // 过度自信偏差
+	DirectionAccuracy float64 // 方向准确率
+	MagnitudeAccuracy float64 // 幅度准确率
+}
+
+// GetCalibrationFactor 获取预测校准因子
+// 基于历史预测的实际表现来校准AI的置信度
+func (pt *PredictionTracker) GetCalibrationFactor(symbol string) *CalibrationData {
+	files, err := ioutil.ReadDir(pt.dataDir)
+	if err != nil {
+		return &CalibrationData{Symbol: symbol, SampleSize: 0, CalibrationFactor: 1.0}
+	}
+
+	var records []PredictionRecord
+
+	// 收集指定币种的历史记录
+	for _, file := range files {
+		if filepath.Ext(file.Name()) != ".json" {
+			continue
+		}
+
+		fullPath := filepath.Join(pt.dataDir, file.Name())
+		data, err := ioutil.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+
+		var record PredictionRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			continue
+		}
+
+		// 只统计已评估的记录
+		if !record.Evaluated {
+			continue
+		}
+
+		// 如果指定了币种，只收集该币种的记录
+		if symbol != "" && record.Symbol != symbol {
+			continue
+		}
+
+		records = append(records, record)
+	}
+
+	// 样本不足时返回默认校准因子
+	if len(records) < 5 {
+		return &CalibrationData{
+			Symbol:            symbol,
+			SampleSize:        len(records),
+			CalibrationFactor: 1.0,
+			DirectionAccuracy: 0.5,
+			MagnitudeAccuracy: 0.5,
+		}
+	}
+
+	// 计算校准指标
+	totalPredictedProb := 0.0
+	totalActualCorrect := 0
+	totalMagnitudeError := 0.0
+	overconfidentCount := 0 // 高置信度预测失败次数
+
+	for _, rec := range records {
+		totalPredictedProb += rec.Prediction.Probability
+
+		if rec.IsCorrect {
+			totalActualCorrect++
+		}
+
+		// 幅度误差（预测vs实际）
+		if rec.Prediction.ExpectedMove != 0 {
+			magnitudeError := math.Abs(rec.Prediction.ExpectedMove-rec.ActualMove) / math.Abs(rec.Prediction.ExpectedMove)
+			if magnitudeError > 1.0 {
+				magnitudeError = 1.0
+			}
+			totalMagnitudeError += magnitudeError
+		}
+
+		// 过度自信检测：高置信度（>70%）预测失败
+		if rec.Prediction.Probability > 0.70 && !rec.IsCorrect {
+			overconfidentCount++
+		}
+	}
+
+	avgPredictedProb := totalPredictedProb / float64(len(records))
+	actualAccuracy := float64(totalActualCorrect) / float64(len(records))
+	avgMagnitudeError := totalMagnitudeError / float64(len(records))
+
+	// 校准因子 = 实际准确率 / 平均预测概率
+	// 如果 AI 总是预测 70% 但只对 50%，校准因子 = 0.50/0.70 = 0.71
+	// 这意味着下次 AI 预测 70% 时，实际应该打 70% * 0.71 = 50%
+	calibrationFactor := 1.0
+	if avgPredictedProb > 0.1 {
+		calibrationFactor = actualAccuracy / avgPredictedProb
+		// 限制校准因子范围 [0.5, 1.5]
+		if calibrationFactor < 0.5 {
+			calibrationFactor = 0.5
+		}
+		if calibrationFactor > 1.5 {
+			calibrationFactor = 1.5
+		}
+	}
+
+	// 过度自信偏差
+	overconfidenceBias := float64(overconfidentCount) / float64(len(records))
+
+	return &CalibrationData{
+		Symbol:            symbol,
+		SampleSize:        len(records),
+		CalibrationFactor: calibrationFactor,
+		OverconfidenceBias: overconfidenceBias,
+		DirectionAccuracy: actualAccuracy,
+		MagnitudeAccuracy: 1.0 - avgMagnitudeError,
+	}
+}
+
+// CalibrateProbability 校准预测概率
+// 根据历史表现调整AI给出的概率
+func (pt *PredictionTracker) CalibrateProbability(symbol string, originalProb float64) float64 {
+	calibration := pt.GetCalibrationFactor(symbol)
+
+	// 样本不足时不校准
+	if calibration.SampleSize < 5 {
+		return originalProb
+	}
+
+	// 应用校准因子
+	calibratedProb := originalProb * calibration.CalibrationFactor
+
+	// 限制范围 [0.0, 1.0]
+	if calibratedProb > 1.0 {
+		calibratedProb = 1.0
+	}
+	if calibratedProb < 0.0 {
+		calibratedProb = 0.0
+	}
+
+	return calibratedProb
+}
+
+// GetCalibrationSummary 获取校准摘要（用于日志和监控）
+func (pt *PredictionTracker) GetCalibrationSummary() string {
+	// 获取所有币种的校准数据
+	symbols := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"} // 主要币种
+	var sb strings.Builder
+
+	sb.WriteString("=== AI预测校准报告 ===\n\n")
+
+	for _, symbol := range symbols {
+		cal := pt.GetCalibrationFactor(symbol)
+		if cal.SampleSize < 3 {
+			continue
+		}
+
+		sb.WriteString(fmt.Sprintf("%s (样本=%d):\n", symbol, cal.SampleSize))
+		sb.WriteString(fmt.Sprintf("  校准因子: %.2f", cal.CalibrationFactor))
+
+		if cal.CalibrationFactor < 0.8 {
+			sb.WriteString(" ⚠️ 过度自信")
+		} else if cal.CalibrationFactor > 1.2 {
+			sb.WriteString(" 📈 保守预测")
+		} else {
+			sb.WriteString(" ✅ 校准良好")
+		}
+
+		sb.WriteString(fmt.Sprintf("\n  方向准确率: %.0f%%\n", cal.DirectionAccuracy*100))
+		sb.WriteString(fmt.Sprintf("  幅度准确率: %.0f%%\n\n", cal.MagnitudeAccuracy*100))
+	}
+
+	// 整体校准
+	overallCal := pt.GetCalibrationFactor("")
+	if overallCal.SampleSize >= 5 {
+		sb.WriteString(fmt.Sprintf("整体 (样本=%d): 校准因子=%.2f, 方向准确率=%.0f%%\n",
+			overallCal.SampleSize, overallCal.CalibrationFactor, overallCal.DirectionAccuracy*100))
+	}
+
+	return sb.String()
 }

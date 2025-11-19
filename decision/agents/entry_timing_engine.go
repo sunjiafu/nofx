@@ -173,103 +173,67 @@ func (e *EntryTimingEngine) validateFundingRate(direction string, md *market.Dat
 	return nil
 }
 
-// classifyEntryTiming 分类入场时机
+// classifyEntryTiming 分类入场时机（简化版 - 防止过拟合）
+// 核心原则：只拒绝明显不合理的入场，避免过多条件导致过拟合
 func (e *EntryTimingEngine) classifyEntryTiming(direction string, md *market.Data) string {
-	currentPrice := md.CurrentPrice
 	rsi14 := md.CurrentRSI14
-	rsi7 := md.CurrentRSI7 // 🆕 增加RSI7检查（更敏感）
 	priceChange1h := md.PriceChange1h
 	ema20 := md.LongerTermContext.EMA20
-	macd := md.CurrentMACD
-	macdSignal := md.MACDSignal
+	currentPrice := md.CurrentPrice
 
 	// 计算价格相对EMA20的偏离度
 	priceToEMA := ((currentPrice - ema20) / ema20) * 100
 
 	if direction == "up" {
-		// ✅ 立即入场条件（满足任意一组）
+		// ============ 做多入场时机（简化版）============
 
-		// 组A：超卖反弹
-		if rsi14 < 45 && priceChange1h < -1.5 && md.CurrentADX > 20 {
-			return "immediate"
-		}
-
-		// 组B：EMA20附近健康入场
-		if priceToEMA >= -0.8 && priceToEMA <= 0.8 &&
-			rsi14 >= 45 && rsi14 <= 60 &&
-			priceChange1h < 2.0 {
-			return "immediate"
-		}
-
-		// 组C：MACD刚金叉
-		if macd > macdSignal && rsi14 >= 40 && rsi14 <= 55 {
-			return "immediate"
-		}
-
-		// 🚫 拒绝入场条件（统一阈值75）
-		if rsi14 > 75 || rsi7 > 75 || priceChange1h > 6.0 || priceToEMA > 4.0 {
+		// 🚫 硬性拒绝：极端超买
+		if rsi14 > 80 {
 			return "reject"
 		}
 
-		// ⏰ 等待回调（默认）
-		if rsi14 > 65 || priceChange1h > 3.0 || priceToEMA > 2.0 {
+		// 🚫 硬性拒绝：1h涨幅过大（追高风险）
+		if priceChange1h > 5.0 {
+			return "reject"
+		}
+
+		// 🚫 硬性拒绝：价格远高于EMA20（过度偏离）
+		if priceToEMA > 4.0 {
+			return "reject"
+		}
+
+		// ⏰ 等待回调：中度超买或中度涨幅
+		if rsi14 > 70 || priceChange1h > 3.0 || priceToEMA > 2.5 {
 			return "wait"
 		}
 
-		// 其他情况：立即入场
+		// ✅ 其他情况：立即入场
 		return "immediate"
 
 	} else if direction == "down" {
-		// 🔧 做空：严格防止接飞刀
+		// ============ 做空入场时机（简化版）============
 
-		// 🚫 第一道防线：严格拒绝超卖和MACD金叉
-		// 1. RSI超卖（双重检查：RSI7和RSI14）- 统一阈值35（与Prompt一致）
-		if rsi14 < 35 || rsi7 < 35 {
-			return "reject" // RSI过低，可能反弹
+		// 🚫 硬性拒绝：极端超卖
+		if rsi14 < 20 {
+			return "reject"
 		}
 
-		// 2. MACD金叉信号（看涨，不应做空）
-		if macd > macdSignal && rsi14 < 55 {
-			return "reject" // MACD金叉，趋势可能反转
+		// 🚫 硬性拒绝：1h跌幅过大（杀跌风险）
+		if priceChange1h < -5.0 {
+			return "reject"
 		}
 
-		// 3. 杀跌过快
-		if priceChange1h < -5.0 || priceToEMA < -4.0 {
-			return "reject" // 跌太快，容易反弹
+		// 🚫 硬性拒绝：价格远低于EMA20（过度偏离）
+		if priceToEMA < -4.0 {
+			return "reject"
 		}
 
-		// ⏰ 第二道防线：等待反弹到更好位置（仅极端情况）
-		// 注：由于第一道防线已设为35，此段代码不会触发，保留用于代码清晰度
-		// 1. RSI接近超卖（真正需要谨慎的区域）
-		if rsi14 < 35 || rsi7 < 30 {
-			return "wait" // 等反弹到安全区域
+		// ⏰ 等待反弹：中度超卖或中度跌幅
+		if rsi14 < 30 || priceChange1h < -3.0 || priceToEMA < -2.5 {
+			return "wait"
 		}
 
-		// 2. 短期下跌过快（真正的杀跌）
-		if priceChange1h < -3.5 || priceToEMA < -3.5 {
-			return "wait" // 跌太快，等反弹
-		}
-
-		// ✅ 健康做空条件（满足任意一组）
-
-		// 组A：超买回调（最理想）
-		if rsi14 > 60 && priceChange1h > 1.5 && md.CurrentADX > 20 {
-			return "immediate"
-		}
-
-		// 组B：EMA20附近（阻力位）
-		if priceToEMA >= -0.8 && priceToEMA <= 0.8 &&
-			rsi14 >= 50 && rsi14 <= 65 &&
-			priceChange1h > -1.0 {
-			return "immediate"
-		}
-
-		// 组C：MACD死叉且RSI健康
-		if macd < macdSignal && rsi14 >= 50 && rsi14 <= 70 {
-			return "immediate"
-		}
-
-		// 其他情况：立即入场（但已通过上述防线过滤）
+		// ✅ 其他情况：立即入场
 		return "immediate"
 	}
 

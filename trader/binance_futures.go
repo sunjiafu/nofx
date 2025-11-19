@@ -13,6 +13,12 @@ import (
 	"github.com/adshao/go-binance/v2/futures"
 )
 
+// CloseInfo 平仓信息（用于动态冷却期）
+type CloseInfo struct {
+	Time       time.Time
+	RealizedPnL float64 // 已实现盈亏
+}
+
 // FuturesTrader 币安合约交易器
 type FuturesTrader struct {
 	client *futures.Client
@@ -27,10 +33,10 @@ type FuturesTrader struct {
 	positionsCacheTime  time.Time
 	positionsCacheMutex sync.RWMutex
 
-	// 冷却期管理：记录每个币种的最后平仓时间
-	lastCloseTimes     map[string]time.Time
+	// 冷却期管理：记录每个币种的平仓信息（时间+盈亏）
+	lastCloseInfos     map[string]CloseInfo
 	closeTimeMutex     sync.RWMutex
-	cooldownDuration   time.Duration // 冷却期时长（默认4小时）
+	cooldownDuration   time.Duration // 默认冷却期（盈利时）
 
 	// 缓存有效期（60秒）- 防止API限流
 	cacheDuration time.Duration
@@ -51,8 +57,8 @@ func NewFuturesTrader(apiKey, secretKey string, useTestnet bool) *FuturesTrader 
 	return &FuturesTrader{
 		client:           client,
 		cacheDuration:    60 * time.Second,  // 60秒缓存（防止币安API限流封禁）
-		lastCloseTimes:   make(map[string]time.Time), // 初始化冷却期记录
-		cooldownDuration: 20 * time.Minute,  // 20分钟冷却期（与TradingConstraints统一）
+		lastCloseInfos:   make(map[string]CloseInfo), // 初始化冷却期记录
+		cooldownDuration: 10 * time.Minute,  // 默认10分钟（盈利时）
 	}
 }
 
@@ -369,10 +375,10 @@ func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
 	return nil
 }
 
-// checkCooldown 检查币种是否在冷却期内
+// checkCooldown 检查币种是否在冷却期内（动态冷却期）
 func (t *FuturesTrader) checkCooldown(symbol string) error {
 	t.closeTimeMutex.RLock()
-	lastCloseTime, exists := t.lastCloseTimes[symbol]
+	closeInfo, exists := t.lastCloseInfos[symbol]
 	t.closeTimeMutex.RUnlock()
 
 	if !exists {
@@ -380,12 +386,30 @@ func (t *FuturesTrader) checkCooldown(symbol string) error {
 		return nil
 	}
 
-	elapsed := time.Since(lastCloseTime)
-	if elapsed < t.cooldownDuration {
-		remaining := t.cooldownDuration - elapsed
-		return fmt.Errorf("%s在冷却期内（平仓后需等待%.0f分钟，已过%.0f分钟，还需%.0f分钟）",
+	// 动态计算冷却期：
+	// - 盈利：10分钟冷却（保持策略运行）
+	// - 小亏（<5 USDT）：20分钟冷却
+	// - 中亏（5-20 USDT）：30分钟冷却
+	// - 大亏（>20 USDT）：60分钟冷却
+	var cooldown time.Duration
+	if closeInfo.RealizedPnL >= 0 {
+		cooldown = 10 * time.Minute // 盈利
+	} else if closeInfo.RealizedPnL > -5 {
+		cooldown = 20 * time.Minute // 小亏
+	} else if closeInfo.RealizedPnL > -20 {
+		cooldown = 30 * time.Minute // 中亏
+	} else {
+		cooldown = 60 * time.Minute // 大亏
+	}
+
+	elapsed := time.Since(closeInfo.Time)
+	if elapsed < cooldown {
+		remaining := cooldown - elapsed
+		pnlStr := fmt.Sprintf("%+.2f", closeInfo.RealizedPnL)
+		return fmt.Errorf("%s在冷却期内（上次盈亏%s USDT，冷却%.0f分钟，已过%.0f分钟，还需%.0f分钟）",
 			symbol,
-			t.cooldownDuration.Minutes(),
+			pnlStr,
+			cooldown.Minutes(),
 			elapsed.Minutes(),
 			remaining.Minutes())
 	}
@@ -393,14 +417,29 @@ func (t *FuturesTrader) checkCooldown(symbol string) error {
 	return nil
 }
 
-// recordCloseTime 记录平仓时间
-func (t *FuturesTrader) recordCloseTime(symbol string) {
+// recordCloseTime 记录平仓时间和盈亏（用于动态冷却期）
+func (t *FuturesTrader) recordCloseTime(symbol string, realizedPnL float64) {
 	t.closeTimeMutex.Lock()
-	t.lastCloseTimes[symbol] = time.Now()
+	t.lastCloseInfos[symbol] = CloseInfo{
+		Time:       time.Now(),
+		RealizedPnL: realizedPnL,
+	}
 	t.closeTimeMutex.Unlock()
 
-	log.Printf("  🕐 已记录 %s 平仓时间，%.0f分钟内禁止再开仓",
-		symbol, t.cooldownDuration.Minutes())
+	// 计算冷却期时长
+	var cooldown time.Duration
+	if realizedPnL >= 0 {
+		cooldown = 10 * time.Minute
+	} else if realizedPnL > -5 {
+		cooldown = 20 * time.Minute
+	} else if realizedPnL > -20 {
+		cooldown = 30 * time.Minute
+	} else {
+		cooldown = 60 * time.Minute
+	}
+
+	log.Printf("  🕐 已记录 %s 平仓（盈亏%+.2f USDT），冷却%.0f分钟",
+		symbol, realizedPnL, cooldown.Minutes())
 }
 
 // SetMarginType 设置保证金模式
@@ -685,8 +724,8 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 	result["status"] = order.Status
 	result["realized_pnl"] = realizedPnL // ✅ 添加realized_pnl字段
 
-	// ✅ 记录平仓时间，启动冷却期
-	t.recordCloseTime(symbol)
+	// ✅ 记录平仓时间和盈亏，启动动态冷却期
+	t.recordCloseTime(symbol, realizedPnL)
 
 	return result, nil
 }
@@ -783,8 +822,8 @@ func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]
 	result["status"] = order.Status
 	result["realized_pnl"] = realizedPnL // ✅ 添加realized_pnl字段
 
-	// ✅ 记录平仓时间，启动冷却期
-	t.recordCloseTime(symbol)
+	// ✅ 记录平仓时间和盈亏，启动动态冷却期
+	t.recordCloseTime(symbol, realizedPnL)
 
 	return result, nil
 }
@@ -1180,16 +1219,61 @@ func (t *FuturesTrader) PlaceLimitOrder(symbol string, side OrderSide, price, qu
 		return nil, fmt.Errorf("格式化价格失败: %w", err)
 	}
 
+	// 🔧 修复：使用格式化后的价格进行所有计算（与币安API保持一致）
+	formattedPrice, _ := strconv.ParseFloat(priceStr, 64)
+
 	quantityStr, err := t.FormatQuantity(symbol, quantity)
 	if err != nil {
 		return nil, fmt.Errorf("格式化数量失败: %w", err)
 	}
 
-	// 验证最小名义价值
+	// ✅ 关键修复：验证并自动调整到最小名义价值（与OpenLong/OpenShort逻辑一致）
+	// 限价单的名义价值 = 格式化后的数量 × 格式化后的价格（币安API的实际验证逻辑）
 	formattedQty, _ := strconv.ParseFloat(quantityStr, 64)
-	notionalValue := formattedQty * price
+	notionalValue := formattedQty * formattedPrice
+
+	log.Printf("  📊 [%s] 限价单初始计算: 数量=%.8f × 价格=%.4f = 名义价值%.2f USDT (原始数量=%.8f, 原始价格=%.4f)",
+		symbol, formattedQty, formattedPrice, notionalValue, quantity, price)
+
 	if notionalValue < 100 {
-		return nil, fmt.Errorf("名义价值%.2f USDT < 100 USDT最小要求", notionalValue)
+		log.Printf("  ⚠️ [%s] 名义价值%.2f USDT < 100 USDT，开始调整...", symbol, notionalValue)
+
+		// 🔧 关键修复：必须使用格式化后的价格计算最小数量
+		minQuantity := 100.0 / formattedPrice
+
+		// 获取精度以便正确舍入
+		precision, _ := t.GetSymbolPrecision(symbol)
+		factor := 1.0
+		for i := 0; i < precision; i++ {
+			factor *= 10
+		}
+
+		// 🔧 向上舍入（确保满足100 USDT）
+		adjustedQty := math.Ceil(minQuantity*factor) / factor
+
+		log.Printf("  🔧 [%s] 计算: minQty=100/%.4f=%.8f → 精度%d → 舍入=ceil(%.8f×%.0f)/%.0f = %.8f",
+			symbol, formattedPrice, minQuantity, precision, minQuantity, factor, factor, adjustedQty)
+
+		// 🔧 修复：再次格式化可能导致精度丢失，所以直接构造字符串
+		// quantityStr, _ = t.FormatQuantity(symbol, adjustedQty)  // 旧代码
+		quantityStr = fmt.Sprintf(fmt.Sprintf("%%.%df", precision), adjustedQty)  // 直接格式化，避免重复调用
+
+		// 验证调整后的结果
+		finalQty, _ := strconv.ParseFloat(quantityStr, 64)
+		finalNotional := finalQty * formattedPrice
+
+		log.Printf("  ✅ [%s] 调整完成: %.8f (%.2f USDT) → %s (%.8f × %.4f = %.2f USDT)",
+			symbol, formattedQty, notionalValue, quantityStr, finalQty, formattedPrice, finalNotional)
+
+		if finalNotional < 100 {
+			log.Printf("  🚨 [%s] 警告: 调整后名义价值仍然不足! %.2f USDT < 100 USDT", symbol, finalNotional)
+		}
+
+		// 更新formattedQty用于后续验证
+		formattedQty = adjustedQty
+		notionalValue = adjustedQty * formattedPrice
+	} else {
+		log.Printf("  ✅ [%s] 名义价值%.2f USDT ≥ 100 USDT，无需调整", symbol, notionalValue)
 	}
 
 	// 确定订单方向
