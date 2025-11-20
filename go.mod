@@ -1,11 +1,12 @@
 module nofx
 
-go 1.19
+go 1.25.0
 
 require (
 	github.com/adshao/go-binance/v2 v2.8.7
 	github.com/ethereum/go-ethereum v1.16.5
 	github.com/gin-gonic/gin v1.11.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/sonirico/go-hyperliquid v0.17.0
 )
 
@@ -32,7 +33,6 @@ require (
 	github.com/goccy/go-json v0.10.4 // indirect
 	github.com/goccy/go-yaml v1.18.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/josharian/intern v1.0.0 // indirect

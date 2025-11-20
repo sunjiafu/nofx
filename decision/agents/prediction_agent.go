@@ -525,6 +525,10 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 			riskStatus = "✅ 正常"
 		}
 
+		// 🐛 调试日志：输出实际的亏损百分比和计算出的阈值
+		log.Printf("🔍 [风控阈值调试] 币种:%s 账户累计亏损:%.2f%% 计算阈值:%.0f%% 状态:%s",
+			ctx.MarketData.Symbol, accountTotalPnLPct, requiredMinProb*100, riskStatus)
+
 		// 🎯 最重要：在最显眼的位置告诉AI当前阈值
 		sb.WriteString("\n## 🎯 当前风控阈值（必须满足）\n")
 		if requiredMinProb > 1.0 {
