@@ -1649,6 +1649,10 @@ func (at *AutoTrader) buildTradeEntry(
 	limitPrice := decision.LimitPrice
 	currentPrice := decision.CurrentPrice
 
+	// 🔍 DEBUG: 验证限价单字段是否正确提取
+	log.Printf("🔍 [buildTradeEntry] %s %s: IsLimitOrder=%v, LimitPrice=%.4f, CurrentPrice=%.4f",
+		decision.Symbol, decision.Action, isLimitOrder, limitPrice, currentPrice)
+
 	// 提取信号（Sprint 1简化：从reasoning中提取关键词）
 	signals := extractSignalsFromReasoning(decision.Reasoning)
 
