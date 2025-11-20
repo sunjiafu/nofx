@@ -493,78 +493,79 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 					pos.Leverage, holdingTime))
 			}
 
-			// 5️⃣ 账户风控提示（基于账户总体盈亏）
-			// 🎯 首先，明确显示当前所需的最低概率阈值
-			var requiredMinProb float64
-			var riskStatus string
-			if accountTotalPnLPct < -20 {
-				requiredMinProb = 1.01 // 禁止开仓
-				riskStatus = "🛑 严格禁止"
-			} else if accountTotalPnLPct < -15 {
-				requiredMinProb = 0.85
-				riskStatus = "🚨 极高要求"
-			} else if accountTotalPnLPct < -10 {
-				requiredMinProb = 0.78
-				riskStatus = "⚠️ 高要求"
-			} else if accountTotalPnLPct < -5 {
-				requiredMinProb = 0.70
-				riskStatus = "💡 谨慎"
-			} else {
-				requiredMinProb = 0.65
-				riskStatus = "✅ 正常"
-			}
-
-			// 🎯 最重要：在最显眼的位置告诉AI当前阈值
-			sb.WriteString("\n## 🎯 当前风控阈值（必须满足）\n")
-			if requiredMinProb > 1.0 {
-				sb.WriteString(fmt.Sprintf("状态: %s | 账户累计亏损: %.2f%%\n", riskStatus, accountTotalPnLPct))
-				sb.WriteString("**⛔ 严格禁止新开仓，必须输出 neutral（概率 0.50-0.55）**\n")
-			} else {
-				sb.WriteString(fmt.Sprintf("状态: %s | 账户累计亏损: %.2f%% | **新开仓最低概率: %.0f%%**\n",
-					riskStatus, accountTotalPnLPct, requiredMinProb*100))
-				sb.WriteString(fmt.Sprintf("⚠️ 重要: 概率 < %.0f%% 的预测将被系统自动拒绝，不会执行开仓！\n", requiredMinProb*100))
-			}
-
-			sb.WriteString("\n⚠️ 决策要求:\n")
-
-			// 🔧 根据账户总体盈亏给出强制约束（不是持仓浮动盈亏）
-			if accountTotalPnLPct < -20 {
-				sb.WriteString("- 🛑 账户累计亏损 > 20%，**严格禁止**新开仓，必须输出neutral（概率0.50-0.55）\n")
-				sb.WriteString("- 立即减仓或止损，保护剩余资金\n")
-			} else if accountTotalPnLPct < -15 {
-				sb.WriteString("- 🚨 账户累计亏损15-20%，新开仓概率必须 ≥ 0.85（极高确定性）\n")
-				sb.WriteString("- 优先考虑与现有持仓风险对冲的方向\n")
-				sb.WriteString("- 检查亏损持仓是否需要止损\n")
-			} else if accountTotalPnLPct < -10 {
-				sb.WriteString("- ⚠️ 账户累计亏损10-15%，新开仓概率必须 ≥ 0.78\n")
-				sb.WriteString("- 检查亏损持仓是否需要调整或止损\n")
-			} else if accountTotalPnLPct < -5 {
-				sb.WriteString("- 💡 账户累计亏损5-10%，新开仓概率建议 ≥ 0.70\n")
-			} else if accountTotalPnLPct > 10 {
-				sb.WriteString("- ✅ 账户盈利 > 10%，可考虑部分止盈锁定利润\n")
-				sb.WriteString("- 检查盈利持仓是否达到移动止损条件\n")
-			}
-
-			// 根据持仓数量给出建议
+			// 根据持仓数量给出建议（保留在if块内）
 			if len(ctx.Positions) >= 3 {
-				sb.WriteString("- 🔒 持仓已满(3/3)，新机会必须 > 80% 概率才考虑替换最弱持仓\n")
+				sb.WriteString("\n- 🔒 持仓已满(3/3)，新机会必须 > 80% 概率才考虑替换最弱持仓\n")
 			} else if len(ctx.Positions) >= 2 {
-				sb.WriteString(fmt.Sprintf("- 📌 已有%d个持仓，剩余1个槽位，新机会需谨慎评估\n", len(ctx.Positions)))
-			}
-
-			// 根据保证金使用率给出建议
-			if ctx.Account.MarginUsedPct > 60 {
-				sb.WriteString("- 🛑 保证金占用 > 60%，严禁新开仓，优先降低风险敞口\n")
-			} else if ctx.Account.MarginUsedPct > 40 {
-				sb.WriteString("- ⚠️ 保证金占用 > 40%，新开仓需降低杠杆或仓位\n")
+				sb.WriteString(fmt.Sprintf("\n- 📌 已有%d个持仓，剩余1个槽位，新机会需谨慎评估\n", len(ctx.Positions)))
 			}
 		} else {
 			sb.WriteString("\n## 📊 当前持仓: 无\n")
 			sb.WriteString("✅ 可自由开仓，建议首仓使用较低杠杆测试市场\n")
 		}
 
+		// 5️⃣ 账户风控提示（基于账户总体盈亏）- 🔧 修复：移到if-else外部，确保无论是否有持仓都显示
+		// 🎯 首先，明确显示当前所需的最低概率阈值
+		var requiredMinProb float64
+		var riskStatus string
+		if accountTotalPnLPct < -20 {
+			requiredMinProb = 1.01 // 禁止开仓
+			riskStatus = "🛑 严格禁止"
+		} else if accountTotalPnLPct < -15 {
+			requiredMinProb = 0.85
+			riskStatus = "🚨 极高要求"
+		} else if accountTotalPnLPct < -10 {
+			requiredMinProb = 0.78
+			riskStatus = "⚠️ 高要求"
+		} else if accountTotalPnLPct < -5 {
+			requiredMinProb = 0.70
+			riskStatus = "💡 谨慎"
+		} else {
+			requiredMinProb = 0.65
+			riskStatus = "✅ 正常"
+		}
+
+		// 🎯 最重要：在最显眼的位置告诉AI当前阈值
+		sb.WriteString("\n## 🎯 当前风控阈值（必须满足）\n")
+		if requiredMinProb > 1.0 {
+			sb.WriteString(fmt.Sprintf("状态: %s | 账户累计亏损: %.2f%%\n", riskStatus, accountTotalPnLPct))
+			sb.WriteString("**⛔ 严格禁止新开仓，必须输出 neutral（概率 0.50-0.55）**\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("状态: %s | 账户累计亏损: %.2f%% | **新开仓最低概率: %.0f%%**\n",
+				riskStatus, accountTotalPnLPct, requiredMinProb*100))
+			sb.WriteString(fmt.Sprintf("⚠️ 重要: 概率 < %.0f%% 的预测将被系统自动拒绝，不会执行开仓！\n", requiredMinProb*100))
+		}
+
+		sb.WriteString("\n⚠️ 决策要求:\n")
+
+		// 🔧 根据账户总体盈亏给出强制约束（不是持仓浮动盈亏）
+		if accountTotalPnLPct < -20 {
+			sb.WriteString("- 🛑 账户累计亏损 > 20%，**严格禁止**新开仓，必须输出neutral（概率0.50-0.55）\n")
+			sb.WriteString("- 立即减仓或止损，保护剩余资金\n")
+		} else if accountTotalPnLPct < -15 {
+			sb.WriteString("- 🚨 账户累计亏损15-20%，新开仓概率必须 ≥ 0.85（极高确定性）\n")
+			sb.WriteString("- 优先考虑与现有持仓风险对冲的方向\n")
+			sb.WriteString("- 检查亏损持仓是否需要止损\n")
+		} else if accountTotalPnLPct < -10 {
+			sb.WriteString("- ⚠️ 账户累计亏损10-15%，新开仓概率必须 ≥ 0.78\n")
+			sb.WriteString("- 检查亏损持仓是否需要调整或止损\n")
+		} else if accountTotalPnLPct < -5 {
+			sb.WriteString("- 💡 账户累计亏损5-10%，新开仓概率建议 ≥ 0.70\n")
+		} else if accountTotalPnLPct > 10 {
+			sb.WriteString("- ✅ 账户盈利 > 10%，可考虑部分止盈锁定利润\n")
+			sb.WriteString("- 检查盈利持仓是否达到移动止损条件\n")
+		}
+
+		// 根据保证金使用率给出建议
+		if ctx.Account.MarginUsedPct > 60 {
+			sb.WriteString("- 🛑 保证金占用 > 60%，严禁新开仓，优先降低风险敞口\n")
+		} else if ctx.Account.MarginUsedPct > 40 {
+			sb.WriteString("- ⚠️ 保证金占用 > 40%，新开仓需降低杠杆或仓位\n")
+		}
+
 		sb.WriteString("\n")
 	}
+
 
 	if ctx != nil && ctx.HistoricalPerf != nil && ctx.HistoricalPerf.OverallWinRate > 0 {
 		perf := ctx.HistoricalPerf
