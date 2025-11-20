@@ -372,6 +372,56 @@ func (at *AutoTrader) checkAndUpdateLimitOrders() error {
 			log.Printf("✅ 限价单成交: %s %s @ %.4f (数量: %.4f)",
 				order.Symbol, order.Side, order.Price, order.Quantity)
 
+			// 🆕 同方向单仓位限制：检查是否已有其他币种的同方向持仓
+			positions, err := at.trader.GetPositions()
+			if err != nil {
+				log.Printf("  ⚠️  获取持仓失败，跳过同方向检查: %v", err)
+			} else {
+				targetSide := "long"
+				if order.Side == OrderSideSell {
+					targetSide = "short"
+				}
+
+				// 检查是否违反同方向单仓位规则
+				for _, pos := range positions {
+					posSymbol := pos["symbol"].(string)
+					posSide := pos["side"].(string)
+
+					// 排除刚成交的这个持仓本身（通过symbol判断）
+					if posSymbol != order.Symbol && posSide == targetSide {
+						directionName := "多仓"
+						if targetSide == "short" {
+							directionName = "空仓"
+						}
+						log.Printf("  ⚠️  同方向单仓位冲突：已有%s%s，%s限价单成交违反规则，立即平仓",
+							posSymbol, directionName, order.Symbol)
+
+						// 立即平掉刚成交的仓位
+						if order.Side == OrderSideBuy {
+							_, err := at.trader.CloseLong(order.Symbol, 0)
+							if err != nil {
+								log.Printf("  ❌ 紧急平仓失败: %v", err)
+							} else {
+								log.Printf("  ✅ 已紧急平掉违规仓位: %s", order.Symbol)
+							}
+						} else {
+							_, err := at.trader.CloseShort(order.Symbol, 0)
+							if err != nil {
+								log.Printf("  ❌ 紧急平仓失败: %v", err)
+							} else {
+								log.Printf("  ✅ 已紧急平掉违规仓位: %s", order.Symbol)
+							}
+						}
+
+						// 从订单管理器中移除
+						at.orderManager.RemoveOrder(order.Symbol)
+
+						// 跳过后续的止损止盈设置
+						goto nextOrder
+					}
+				}
+			}
+
 			// 🛡️ 记录开仓到硬约束管理器
 			side := "long"
 			if order.Side == OrderSideSell {
@@ -413,6 +463,56 @@ func (at *AutoTrader) checkAndUpdateLimitOrders() error {
 			// 取消剩余订单
 			if err := binanceTrader.CancelLimitOrder(order.Symbol, orderID); err != nil {
 				log.Printf("  ⚠️  取消剩余订单失败: %v", err)
+			}
+
+			// 🆕 同方向单仓位限制：检查是否已有其他币种的同方向持仓
+			positions, err := at.trader.GetPositions()
+			if err != nil {
+				log.Printf("  ⚠️  获取持仓失败，跳过同方向检查: %v", err)
+			} else {
+				targetSide := "long"
+				if order.Side == OrderSideSell {
+					targetSide = "short"
+				}
+
+				// 检查是否违反同方向单仓位规则
+				for _, pos := range positions {
+					posSymbol := pos["symbol"].(string)
+					posSide := pos["side"].(string)
+
+					// 排除刚成交的这个持仓本身（通过symbol判断）
+					if posSymbol != order.Symbol && posSide == targetSide {
+						directionName := "多仓"
+						if targetSide == "short" {
+							directionName = "空仓"
+						}
+						log.Printf("  ⚠️  同方向单仓位冲突：已有%s%s，%s部分成交违反规则，立即平仓",
+							posSymbol, directionName, order.Symbol)
+
+						// 立即平掉部分成交的仓位
+						if order.Side == OrderSideBuy {
+							_, err := at.trader.CloseLong(order.Symbol, 0)
+							if err != nil {
+								log.Printf("  ❌ 紧急平仓失败: %v", err)
+							} else {
+								log.Printf("  ✅ 已紧急平掉违规仓位: %s", order.Symbol)
+							}
+						} else {
+							_, err := at.trader.CloseShort(order.Symbol, 0)
+							if err != nil {
+								log.Printf("  ❌ 紧急平仓失败: %v", err)
+							} else {
+								log.Printf("  ✅ 已紧急平掉违规仓位: %s", order.Symbol)
+							}
+						}
+
+						// 从订单管理器中移除
+						at.orderManager.RemoveOrder(order.Symbol)
+
+						// 跳过后续的止损止盈设置
+						goto nextOrder
+					}
+				}
 			}
 
 			// 🛡️ 记录开仓到硬约束管理器（部分成交也算开仓）
@@ -465,6 +565,7 @@ func (at *AutoTrader) checkAndUpdateLimitOrders() error {
 		default:
 			log.Printf("⚠️  未知订单状态: %s %s - 状态: %s", order.Symbol, order.OrderID, status)
 		}
+	nextOrder:
 	}
 
 	return nil
