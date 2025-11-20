@@ -280,6 +280,14 @@ func (at *AutoTrader) Run() error {
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
+	// 🛡️ 启动时恢复缺失的止损止盈（防止重启导致持仓失去保护）
+	if at.config.UseLimitOrders {
+		log.Println("🔧 检查限价单持仓是否有缺失的止损保护...")
+		if err := at.RecoverMissingStopLoss(); err != nil {
+			log.Printf("⚠️  恢复止损失败: %v（将继续运行，但请手动检查持仓）", err)
+		}
+	}
+
 	// 启动山寨币WebSocket监控器（独立运行，实时获取市场数据）
 	if at.altcoinScanEnabled && at.altcoinWSMonitor != nil {
 		log.Println("🔌 启动WebSocket监控器（实时追踪所有USDT合约）...")

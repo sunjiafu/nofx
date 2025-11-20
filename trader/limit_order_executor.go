@@ -6,6 +6,7 @@ import (
 	"nofx/decision"
 	"nofx/logger"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -206,6 +207,114 @@ func (at *AutoTrader) executeOpenLimitOrderWithRecord(d *decision.Decision, acti
 		d.Symbol, side, d.LimitPrice, quantity, pullbackPct)
 
 	return nil
+}
+
+// RecoverMissingStopLoss 启动恢复：检查已成交但缺少止损的持仓
+func (at *AutoTrader) RecoverMissingStopLoss() error {
+	log.Printf("🔧 检查是否有持仓缺少止损保护...")
+
+	// 获取当前持仓
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return fmt.Errorf("获取持仓失败: %w", err)
+	}
+
+	binanceTrader, ok := at.trader.(*FuturesTrader)
+	if !ok {
+		return fmt.Errorf("恢复功能仅支持币安交易")
+	}
+
+	// 获取所有活跃的限价单记录
+	activeOrders := at.orderManager.GetAllOrders()
+	orderMap := make(map[string]*LimitOrder)
+	for _, order := range activeOrders {
+		orderMap[order.Symbol] = order
+	}
+
+	recoveryCount := 0
+	for _, pos := range positions {
+		symbol := pos["symbol"].(string)
+		side := pos["side"].(string)
+		quantity := pos["positionAmt"].(float64)
+		if quantity < 0 {
+			quantity = -quantity
+		}
+
+		// 检查该持仓是否有限价单记录
+		order, hasOrder := orderMap[symbol]
+		if !hasOrder {
+			log.Printf("⚠️  [%s %s] 无限价单记录，跳过恢复（可能是系统重启前的旧持仓）", symbol, side)
+			continue
+		}
+
+		// 检查该持仓是否已有止损止盈（查询交易所）
+		hasStopLoss, err := at.checkHasStopLoss(binanceTrader, symbol, side)
+		if err != nil {
+			log.Printf("⚠️  [%s] 检查止损状态失败: %v", symbol, err)
+			continue
+		}
+
+		if !hasStopLoss {
+			// 🚨 发现缺少止损的持仓！从限价单记录中恢复
+			log.Printf("🚨 [%s %s] 检测到持仓缺少止损，开始恢复...", symbol, side)
+			log.Printf("   原始限价单: 止损=%.4f, 止盈=%.4f", order.StopLoss, order.TakeProfit)
+
+			positionSide := strings.ToUpper(side)
+			if side == "long" {
+				if err := at.trader.SetStopLoss(symbol, "LONG", quantity, order.StopLoss); err != nil {
+					log.Printf("  ❌ 恢复止损失败: %v", err)
+					continue
+				}
+				if err := at.trader.SetTakeProfit(symbol, "LONG", quantity, order.TakeProfit); err != nil {
+					log.Printf("  ⚠️  恢复止盈失败: %v", err)
+				}
+			} else {
+				if err := at.trader.SetStopLoss(symbol, "SHORT", quantity, order.StopLoss); err != nil {
+					log.Printf("  ❌ 恢复止损失败: %v", err)
+					continue
+				}
+				if err := at.trader.SetTakeProfit(symbol, "SHORT", quantity, order.TakeProfit); err != nil {
+					log.Printf("  ⚠️  恢复止盈失败: %v", err)
+				}
+			}
+
+			log.Printf("  ✅ [%s %s] 止损止盈恢复成功！", symbol, positionSide)
+			recoveryCount++
+
+			// 从OrderManager中移除（已成交）
+			at.orderManager.RemoveOrder(symbol)
+		}
+	}
+
+	if recoveryCount > 0 {
+		log.Printf("✅ 恢复完成：%d个持仓的止损止盈已补设", recoveryCount)
+	} else {
+		log.Printf("✅ 所有持仓均有止损保护")
+	}
+
+	return nil
+}
+
+// checkHasStopLoss 检查持仓是否已有止损止盈
+func (at *AutoTrader) checkHasStopLoss(binanceTrader *FuturesTrader, symbol string, side string) (bool, error) {
+	// 查询该币种的所有挂单
+	orders, err := binanceTrader.GetOpenOrders(symbol)
+	if err != nil {
+		return false, err
+	}
+
+	// 检查是否有STOP_MARKET类型的订单
+	for _, order := range orders {
+		orderType, ok := order["type"].(string)
+		if !ok {
+			continue
+		}
+		if orderType == "STOP_MARKET" || orderType == "TAKE_PROFIT_MARKET" {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // checkAndUpdateLimitOrders 每个周期检查并更新限价单状态

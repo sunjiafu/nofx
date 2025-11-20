@@ -1360,3 +1360,32 @@ func (t *FuturesTrader) GetOrderStatus(symbol string, orderID int64) (map[string
 
 	return result, nil
 }
+
+// GetOpenOrders 获取指定币种的所有挂单（用于检查止损止盈是否存在）
+func (t *FuturesTrader) GetOpenOrders(symbol string) ([]map[string]interface{}, error) {
+	orders, err := t.client.NewListOpenOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+
+	if err != nil {
+		return nil, fmt.Errorf("查询挂单失败: %w", err)
+	}
+
+	results := make([]map[string]interface{}, 0, len(orders))
+	for _, order := range orders {
+		result := make(map[string]interface{})
+		result["orderId"] = order.OrderID
+		result["symbol"] = order.Symbol
+		result["status"] = string(order.Status)
+		result["side"] = string(order.Side)
+		result["type"] = string(order.Type)
+		result["price"], _ = strconv.ParseFloat(order.Price, 64)
+		result["origQty"], _ = strconv.ParseFloat(order.OrigQuantity, 64)
+		result["executedQty"], _ = strconv.ParseFloat(order.ExecutedQuantity, 64)
+		result["stopPrice"], _ = strconv.ParseFloat(order.StopPrice, 64)
+		result["updateTime"] = order.UpdateTime
+		results = append(results, result)
+	}
+
+	return results, nil
+}

@@ -1,8 +1,11 @@
 package trader
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -11,8 +14,8 @@ import (
 type OrderType string
 
 const (
-	OrderTypeLimit  OrderType = "LIMIT"   // 限价单
-	OrderTypeMarket OrderType = "MARKET"  // 市价单
+	OrderTypeLimit  OrderType = "LIMIT"  // 限价单
+	OrderTypeMarket OrderType = "MARKET" // 市价单
 )
 
 // OrderStatus 订单状态
@@ -53,27 +56,101 @@ type LimitOrder struct {
 	Reasoning    string      `json:"reasoning"`     // 开仓理由
 }
 
-// OrderManager 订单管理器
+// OrderManager 订单管理器（支持持久化）
 type OrderManager struct {
 	activeOrders map[string]*LimitOrder // symbol -> order
 	mu           sync.RWMutex
+	filepath     string // 🆕 持久化文件路径
 }
 
 // NewOrderManager 创建订单管理器
 func NewOrderManager() *OrderManager {
-	return &OrderManager{
-		activeOrders: make(map[string]*LimitOrder),
+	return NewOrderManagerWithPath("limit_orders")
+}
+
+// NewOrderManagerWithPath 创建订单管理器（指定持久化目录）
+func NewOrderManagerWithPath(dirPath string) *OrderManager {
+	// 确保目录存在
+	if err := os.MkdirAll(dirPath, 0755); err != nil {
+		log.Printf("⚠️  创建限价单目录失败: %v", err)
 	}
+
+	filepath := filepath.Join(dirPath, "active_orders.json")
+	om := &OrderManager{
+		activeOrders: make(map[string]*LimitOrder),
+		filepath:     filepath,
+	}
+
+	// 🆕 启动时从文件加载
+	if err := om.Load(); err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("📂 限价单文件不存在，初始化为空")
+		} else {
+			log.Printf("⚠️  加载限价单失败: %v", err)
+		}
+	} else {
+		log.Printf("📂 加载限价单成功：%d个活跃订单", len(om.activeOrders))
+	}
+
+	return om
+}
+
+// Load 从文件加载限价单
+func (om *OrderManager) Load() error {
+	data, err := os.ReadFile(om.filepath)
+	if err != nil {
+		return err
+	}
+
+	om.mu.Lock()
+	defer om.mu.Unlock()
+
+	// 解析JSON
+	var orders map[string]*LimitOrder
+	if err := json.Unmarshal(data, &orders); err != nil {
+		return fmt.Errorf("JSON解析失败: %w", err)
+	}
+
+	om.activeOrders = orders
+	return nil
+}
+
+// Save 保存限价单到文件
+func (om *OrderManager) Save() error {
+	om.mu.RLock()
+	data, err := json.MarshalIndent(om.activeOrders, "", "  ")
+	om.mu.RUnlock()
+
+	if err != nil {
+		return fmt.Errorf("JSON序列化失败: %w", err)
+	}
+
+	// 原子写入（先写临时文件，再重命名）
+	tmpFile := om.filepath + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		return fmt.Errorf("写入临时文件失败: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, om.filepath); err != nil {
+		return fmt.Errorf("重命名文件失败: %w", err)
+	}
+
+	return nil
 }
 
 // AddOrder 添加限价单
 func (om *OrderManager) AddOrder(order *LimitOrder) {
 	om.mu.Lock()
-	defer om.mu.Unlock()
-
 	om.activeOrders[order.Symbol] = order
+	om.mu.Unlock()
+
 	log.Printf("📝 [OrderManager] 添加限价单: %s %s @ %.4f (订单ID: %s)",
 		order.Symbol, order.Side, order.Price, order.OrderID)
+
+	// 🆕 持久化到文件
+	if err := om.Save(); err != nil {
+		log.Printf("⚠️  保存限价单失败: %v", err)
+	}
 }
 
 // GetOrder 获取指定币种的订单
@@ -88,20 +165,22 @@ func (om *OrderManager) GetOrder(symbol string) (*LimitOrder, bool) {
 // RemoveOrder 移除订单
 func (om *OrderManager) RemoveOrder(symbol string) {
 	om.mu.Lock()
-	defer om.mu.Unlock()
-
 	if order, exists := om.activeOrders[symbol]; exists {
 		log.Printf("🗑️  [OrderManager] 移除订单: %s (订单ID: %s, 状态: %s)",
 			symbol, order.OrderID, order.Status)
 		delete(om.activeOrders, symbol)
+	}
+	om.mu.Unlock()
+
+	// 🆕 持久化到文件
+	if err := om.Save(); err != nil {
+		log.Printf("⚠️  保存限价单失败: %v", err)
 	}
 }
 
 // UpdateOrderStatus 更新订单状态
 func (om *OrderManager) UpdateOrderStatus(symbol string, status OrderStatus, filledQty, avgPrice float64) {
 	om.mu.Lock()
-	defer om.mu.Unlock()
-
 	if order, exists := om.activeOrders[symbol]; exists {
 		oldStatus := order.Status
 		order.Status = status
@@ -111,6 +190,12 @@ func (om *OrderManager) UpdateOrderStatus(symbol string, status OrderStatus, fil
 
 		log.Printf("🔄 [OrderManager] 订单状态更新: %s %s → %s (成交: %.4f/%.4f @ %.4f)",
 			symbol, oldStatus, status, filledQty, order.Quantity, avgPrice)
+	}
+	om.mu.Unlock()
+
+	// 🆕 持久化到文件
+	if err := om.Save(); err != nil {
+		log.Printf("⚠️  保存限价单失败: %v", err)
 	}
 }
 
