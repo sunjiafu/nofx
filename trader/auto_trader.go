@@ -876,6 +876,15 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		return fmt.Errorf("硬约束拦截: %w", err)
 	}
 
+	// 🆕 同方向单仓位限制：检查是否已有其他币种的多仓
+	for _, pos := range positions {
+		if pos["symbol"] != decision.Symbol && pos["side"] == "long" {
+			existingSymbol := pos["symbol"].(string)
+			return fmt.Errorf("❌ 同方向只能持有一个币种：已有%s多仓，拒绝开%s多仓。如需换仓，请先平掉%s",
+				existingSymbol, decision.Symbol, existingSymbol)
+		}
+	}
+
 	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
 	for _, pos := range positions {
 		if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
@@ -1003,6 +1012,15 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	if err := at.constraints.CanOpenPosition(decision.Symbol, len(positions)); err != nil {
 		log.Printf("  ⚠️  硬约束拦截: %v", err)
 		return fmt.Errorf("硬约束拦截: %w", err)
+	}
+
+	// 🆕 同方向单仓位限制：检查是否已有其他币种的空仓
+	for _, pos := range positions {
+		if pos["symbol"] != decision.Symbol && pos["side"] == "short" {
+			existingSymbol := pos["symbol"].(string)
+			return fmt.Errorf("❌ 同方向只能持有一个币种：已有%s空仓，拒绝开%s空仓。如需换仓，请先平掉%s",
+				existingSymbol, decision.Symbol, existingSymbol)
+		}
 	}
 
 	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）

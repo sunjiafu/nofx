@@ -26,7 +26,7 @@ func (at *AutoTrader) executeOpenLimitOrderWithRecord(d *decision.Decision, acti
 		return fmt.Errorf("硬约束拦截: %w", err)
 	}
 
-	// ⚠️ 检查是否已有同币种同方向持仓，如果有则拒绝（防止仓位叠加）
+	// 确定目标方向
 	targetSide := ""
 	if d.Action == "open_long" {
 		targetSide = "long"
@@ -34,6 +34,20 @@ func (at *AutoTrader) executeOpenLimitOrderWithRecord(d *decision.Decision, acti
 		targetSide = "short"
 	}
 
+	// 🆕 同方向单仓位限制：检查是否已有其他币种的同方向持仓
+	for _, pos := range positions {
+		if pos["symbol"] != d.Symbol && pos["side"] == targetSide {
+			existingSymbol := pos["symbol"].(string)
+			directionName := "多仓"
+			if targetSide == "short" {
+				directionName = "空仓"
+			}
+			return fmt.Errorf("❌ 同方向只能持有一个币种：已有%s%s，拒绝开%s%s。如需换仓，请先平掉%s",
+				existingSymbol, directionName, d.Symbol, directionName, existingSymbol)
+		}
+	}
+
+	// ⚠️ 检查是否已有同币种同方向持仓，如果有则拒绝（防止仓位叠加）
 	for _, pos := range positions {
 		if pos["symbol"] == d.Symbol && pos["side"] == targetSide {
 			return fmt.Errorf("❌ %s 已有%s仓，拒绝下限价单以防止仓位叠加", d.Symbol, targetSide)
