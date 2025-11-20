@@ -632,15 +632,9 @@ func (o *DecisionOrchestrator) shouldClosePositionWithReason(pos PositionInfoInp
 		return true, fmt.Sprintf("止损: 亏损%.2f%% > 20%%", pos.UnrealizedPnLPct)
 	}
 
-	// 3. 如果已经盈利>20% 且预测变为中性 → 获利了结
-	if pos.UnrealizedPnLPct > 20.0 && prediction.Direction == "neutral" {
-		log.Printf("  → 触发条件3: 获利了结(盈利%.2f%%)", pos.UnrealizedPnLPct)
-		return true, fmt.Sprintf("获利了结: 盈利%.2f%% > 20%% 且预测中性", pos.UnrealizedPnLPct)
-	}
-
-	// 4. 如果持仓时间过长（超过24小时）且未盈利 → 平仓
+	// 3. 如果持仓时间过长（超过24小时）且未盈利 → 平仓
 	if holdDuration > 24*time.Hour && pos.UnrealizedPnLPct < 5.0 {
-		log.Printf("  → 触发条件4: 持仓过久(%.1f小时, 盈利%.2f%%)", holdDuration.Hours(), pos.UnrealizedPnLPct)
+		log.Printf("  → 触发条件3: 持仓过久(%.1f小时, 盈利%.2f%%)", holdDuration.Hours(), pos.UnrealizedPnLPct)
 		return true, fmt.Sprintf("持仓过久: %.0f小时 > 24小时且盈利%.2f%% < 5%%", holdDuration.Hours(), pos.UnrealizedPnLPct)
 	}
 
