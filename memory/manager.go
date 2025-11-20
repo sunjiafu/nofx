@@ -184,7 +184,27 @@ func (m *Manager) GetContextPrompt() string {
 				emoji = "➖"
 			}
 			prompt += fmt.Sprintf("  结果: %s %s %.2f%%\n", emoji, trade.Result, trade.ReturnPct)
+		} else if trade.IsLimitOrder {
+			// 🆕 限价单未成交：显示等待状态
+			if trade.LimitPrice > 0 && trade.CurrentPrice > 0 {
+				var direction string
+				var distancePct float64
+				if trade.Side == "long" {
+					// 做多限价单：等待价格回调到限价
+					direction = "⬇️"
+					distancePct = ((trade.CurrentPrice - trade.LimitPrice) / trade.CurrentPrice) * 100
+				} else {
+					// 做空限价单：等待价格反弹到限价
+					direction = "⬆️"
+					distancePct = ((trade.LimitPrice - trade.CurrentPrice) / trade.CurrentPrice) * 100
+				}
+				prompt += fmt.Sprintf("  结果: ⏰ 等待限价单成交 (限价%.4f %s 距当前%.2f%%)\n",
+					trade.LimitPrice, direction, distancePct)
+			} else {
+				prompt += "  结果: ⏰ 等待限价单成交\n"
+			}
 		} else {
+			// 市价单已成交，持仓进行中
 			prompt += "  结果: ⏳ 进行中\n"
 		}
 		prompt += "\n"

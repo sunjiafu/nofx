@@ -1644,6 +1644,11 @@ func (at *AutoTrader) buildTradeEntry(
 		positionPct = (decision.PositionSizeUSD / float64(decision.Leverage)) / ctx.Account.TotalEquity * 100
 	}
 
+	// 🆕 提取限价单信息（如果是限价单开仓）
+	isLimitOrder := decision.IsLimitOrder
+	limitPrice := decision.LimitPrice
+	currentPrice := decision.CurrentPrice
+
 	// 提取信号（Sprint 1简化：从reasoning中提取关键词）
 	signals := extractSignalsFromReasoning(decision.Reasoning)
 
@@ -1715,6 +1720,9 @@ func (at *AutoTrader) buildTradeEntry(
 		ExitPrice:          exitPrice,
 		PositionPct:        positionPct,
 		Leverage:           decision.Leverage,
+		IsLimitOrder:       isLimitOrder,  // 🆕 限价单标识
+		LimitPrice:         limitPrice,     // 🆕 限价单价格
+		CurrentPrice:       currentPrice,   // 🆕 提交时市价
 		MarketSnapshot:     marketSnapshot,
 		HoldMinutes:        holdMinutes,
 		ReturnPct:          returnPct,

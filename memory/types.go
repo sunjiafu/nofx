@@ -77,6 +77,11 @@ type TradeEntry struct {
 	PositionPct float64 `json:"position_pct"` // 仓位占比%
 	Leverage    int     `json:"leverage,omitempty"`
 
+	// 🆕 限价单信息
+	IsLimitOrder bool    `json:"is_limit_order,omitempty"` // 是否是限价单
+	LimitPrice   float64 `json:"limit_price,omitempty"`    // 限价单目标价格
+	CurrentPrice float64 `json:"current_price,omitempty"`  // 提交时的市价
+
 	// 🆕 市场数值快照（关键技术指标）
 	MarketSnapshot *MarketSnapshot `json:"market_snapshot,omitempty"`
 
