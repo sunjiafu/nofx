@@ -297,14 +297,14 @@ func (o *DecisionOrchestrator) GetFullDecisionPredictive(ctx *Context) (*FullDec
 				accountRiskViolation = fmt.Sprintf("账户累计亏损%.2f%% > 20%%，严格禁止新开仓", accountTotalPnLPct)
 				requiredMinProb = 1.01 // 设置一个不可能达到的阈值，强制拒绝
 			} else if accountTotalPnLPct < -15 {
-				// 亏损 15-20%：要求极高概率
-				requiredMinProb = math.Max(requiredMinProb, 0.85)
+				// 亏损 15-20%：谨慎交易，降低阈值给AI更多机会
+				requiredMinProb = math.Max(requiredMinProb, 0.75)
 			} else if accountTotalPnLPct < -10 {
-				// 亏损 10-15%：要求高概率
-				requiredMinProb = math.Max(requiredMinProb, 0.78)
-			} else if accountTotalPnLPct < -5 {
-				// 亏损 5-10%：建议高概率
+				// 亏损 10-15%：适度谨慎
 				requiredMinProb = math.Max(requiredMinProb, 0.70)
+			} else if accountTotalPnLPct < -5 {
+				// 亏损 5-10%：正常偏谨慎
+				requiredMinProb = math.Max(requiredMinProb, 0.68)
 			}
 
 			// 判断是否值得开仓

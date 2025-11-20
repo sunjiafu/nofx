@@ -165,6 +165,12 @@ func (agent *PredictionAgent) buildPredictionPrompt(ctx *PredictionContext) (sys
 
 	systemPrompt = `你是一名专业的加密货币量化预测员，专为 BTC/ETH 预测短期走势（1h/4h/24h）。必须综合考虑【账户风险+持仓情况+技术指标】做出决策，并严格输出 JSON。
 
+🌟 **心态指引**：
+- 这是小资金测试账户，用于优化策略和积累经验
+- 不要因历史亏损而过度悲观或恐惧，每次决策都是独立的
+- 专注当前市场信号和机会，而非过度纠结过往失误
+- 满足风控阈值且信号明确时，应果断行动而非观望
+
 =====================
 【0. 🎯 综合决策框架（核心优先级）】
 
@@ -509,14 +515,14 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 			requiredMinProb = 1.01 // 禁止开仓
 			riskStatus = "🛑 严格禁止"
 		} else if accountTotalPnLPct < -15 {
-			requiredMinProb = 0.85
-			riskStatus = "🚨 极高要求"
+			requiredMinProb = 0.75 // 降低阈值，给AI更多机会
+			riskStatus = "⚠️ 谨慎交易"
 		} else if accountTotalPnLPct < -10 {
-			requiredMinProb = 0.78
-			riskStatus = "⚠️ 高要求"
-		} else if accountTotalPnLPct < -5 {
 			requiredMinProb = 0.70
-			riskStatus = "💡 谨慎"
+			riskStatus = "💡 适度谨慎"
+		} else if accountTotalPnLPct < -5 {
+			requiredMinProb = 0.68
+			riskStatus = "✅ 正常偏谨慎"
 		} else {
 			requiredMinProb = 0.65
 			riskStatus = "✅ 正常"
@@ -532,10 +538,16 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 			sb.WriteString(fmt.Sprintf("状态: %s | 账户累计亏损: %.2f%%\n", riskStatus, accountTotalPnLPct))
 			sb.WriteString("**⛔ 严格禁止新开仓，必须输出 neutral（概率 0.50-0.55）**\n")
 		} else {
-			sb.WriteString(fmt.Sprintf("**📢 强制要求：当前账户亏损 %.2f%%，新开仓最低概率阈值为 %.0f%%**\n",
-				accountTotalPnLPct, requiredMinProb*100))
-			sb.WriteString(fmt.Sprintf("**⚠️ 你不得擅自修改此阈值！概率 < %.0f%% 的预测将被系统强制拒绝！**\n", requiredMinProb*100))
-			sb.WriteString(fmt.Sprintf("**✋ 在你的reasoning中提到概率要求时，必须使用 %.0f%%，不得使用其他数值！**\n", requiredMinProb*100))
+			sb.WriteString(fmt.Sprintf("**📢 当前风控状态：%s | 账户亏损 %.2f%% | 最低概率阈值：%.0f%%**\n",
+				riskStatus, accountTotalPnLPct, requiredMinProb*100))
+			sb.WriteString(fmt.Sprintf("**⚠️ 你不得擅自修改此阈值！概率 < %.0f%% 的预测将被系统强制拒绝！**\n\n", requiredMinProb*100))
+
+			// 🌟 添加积极提示
+			sb.WriteString("💡 **重要提醒**：\n")
+			sb.WriteString("- 这是**小资金测试账户**，目的是优化策略和积累经验\n")
+			sb.WriteString("- 不要因历史亏损而过度悲观，每次决策都是独立的新机会\n")
+			sb.WriteString("- 关注**当前技术信号**和市场机会，而非过度纠结历史表现\n")
+			sb.WriteString("- 符合概率阈值且技术信号明确时，应该**果断行动**而非观望\n")
 		}
 
 		sb.WriteString("\n⚠️ 决策要求:\n")
