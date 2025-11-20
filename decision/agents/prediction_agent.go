@@ -494,6 +494,37 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 			}
 
 			// 5️⃣ 账户风控提示（基于账户总体盈亏）
+			// 🎯 首先，明确显示当前所需的最低概率阈值
+			var requiredMinProb float64
+			var riskStatus string
+			if accountTotalPnLPct < -20 {
+				requiredMinProb = 1.01 // 禁止开仓
+				riskStatus = "🛑 严格禁止"
+			} else if accountTotalPnLPct < -15 {
+				requiredMinProb = 0.85
+				riskStatus = "🚨 极高要求"
+			} else if accountTotalPnLPct < -10 {
+				requiredMinProb = 0.78
+				riskStatus = "⚠️ 高要求"
+			} else if accountTotalPnLPct < -5 {
+				requiredMinProb = 0.70
+				riskStatus = "💡 谨慎"
+			} else {
+				requiredMinProb = 0.65
+				riskStatus = "✅ 正常"
+			}
+
+			// 🎯 最重要：在最显眼的位置告诉AI当前阈值
+			sb.WriteString("\n## 🎯 当前风控阈值（必须满足）\n")
+			if requiredMinProb > 1.0 {
+				sb.WriteString(fmt.Sprintf("状态: %s | 账户累计亏损: %.2f%%\n", riskStatus, accountTotalPnLPct))
+				sb.WriteString("**⛔ 严格禁止新开仓，必须输出 neutral（概率 0.50-0.55）**\n")
+			} else {
+				sb.WriteString(fmt.Sprintf("状态: %s | 账户累计亏损: %.2f%% | **新开仓最低概率: %.0f%%**\n",
+					riskStatus, accountTotalPnLPct, requiredMinProb*100))
+				sb.WriteString(fmt.Sprintf("⚠️ 重要: 概率 < %.0f%% 的预测将被系统自动拒绝，不会执行开仓！\n", requiredMinProb*100))
+			}
+
 			sb.WriteString("\n⚠️ 决策要求:\n")
 
 			// 🔧 根据账户总体盈亏给出强制约束（不是持仓浮动盈亏）
