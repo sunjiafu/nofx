@@ -553,18 +553,19 @@ func (agent *PredictionAgent) buildUserPrompt(ctx *PredictionContext) string {
 		sb.WriteString("\n⚠️ 决策要求:\n")
 
 		// 🔧 根据账户总体盈亏给出强制约束（不是持仓浮动盈亏）
+		// 💡 使用前面计算的动态阈值，避免与实际风控不一致
 		if accountTotalPnLPct < -20 {
 			sb.WriteString("- 🛑 账户累计亏损 > 20%，**严格禁止**新开仓，必须输出neutral（概率0.50-0.55）\n")
 			sb.WriteString("- 立即减仓或止损，保护剩余资金\n")
 		} else if accountTotalPnLPct < -15 {
-			sb.WriteString("- 🚨 账户累计亏损15-20%，新开仓概率必须 ≥ 0.85（极高确定性）\n")
+			sb.WriteString(fmt.Sprintf("- ⚠️ 账户累计亏损15-20%%，新开仓概率必须 ≥ %.0f%%\n", requiredMinProb*100))
 			sb.WriteString("- 优先考虑与现有持仓风险对冲的方向\n")
 			sb.WriteString("- 检查亏损持仓是否需要止损\n")
 		} else if accountTotalPnLPct < -10 {
-			sb.WriteString("- ⚠️ 账户累计亏损10-15%，新开仓概率必须 ≥ 0.78\n")
+			sb.WriteString(fmt.Sprintf("- 💡 账户累计亏损10-15%%，新开仓概率必须 ≥ %.0f%%\n", requiredMinProb*100))
 			sb.WriteString("- 检查亏损持仓是否需要调整或止损\n")
 		} else if accountTotalPnLPct < -5 {
-			sb.WriteString("- 💡 账户累计亏损5-10%，新开仓概率建议 ≥ 0.70\n")
+			sb.WriteString(fmt.Sprintf("- ✅ 账户累计亏损5-10%%，新开仓概率建议 ≥ %.0f%%\n", requiredMinProb*100))
 		} else if accountTotalPnLPct > 10 {
 			sb.WriteString("- ✅ 账户盈利 > 10%，可考虑部分止盈锁定利润\n")
 			sb.WriteString("- 检查盈利持仓是否达到移动止损条件\n")
