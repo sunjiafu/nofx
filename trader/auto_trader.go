@@ -864,6 +864,11 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  📈 开多仓: %s", decision.Symbol)
 
+	// ⚠️ 关键修复：强制刷新缓存，确保获取最新持仓信息（防止缓存导致同方向检查失效）
+	if binanceTrader, ok := at.trader.(*FuturesTrader); ok {
+		binanceTrader.InvalidatePositionsCache()
+	}
+
 	// ⚠️ 先获取当前持仓信息（用于硬约束检查和防止仓位叠加）
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -1001,6 +1006,11 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 // executeOpenShortWithRecord 执行开空仓并记录详细信息
 func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  📉 开空仓: %s", decision.Symbol)
+
+	// ⚠️ 关键修复：强制刷新缓存，确保获取最新持仓信息（防止缓存导致同方向检查失效）
+	if binanceTrader, ok := at.trader.(*FuturesTrader); ok {
+		binanceTrader.InvalidatePositionsCache()
+	}
 
 	// ⚠️ 先获取当前持仓信息（用于硬约束检查和防止仓位叠加）
 	positions, err := at.trader.GetPositions()

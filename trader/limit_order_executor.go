@@ -15,6 +15,11 @@ func (at *AutoTrader) executeOpenLimitOrderWithRecord(d *decision.Decision, acti
 	log.Printf("  📝 限价单模式: %s @ %.4f (当前价 %.4f)",
 		d.Symbol, d.LimitPrice, d.CurrentPrice)
 
+	// ⚠️ 关键修复：强制刷新缓存，确保获取最新持仓信息（防止缓存导致同方向检查失效）
+	if binanceTrader, ok := at.trader.(*FuturesTrader); ok {
+		binanceTrader.InvalidatePositionsCache()
+	}
+
 	// 🛡️ 硬约束检查（冷却期、日交易上限、小时上限、最大持仓数量）
 	positions, err := at.trader.GetPositions()
 	if err != nil {

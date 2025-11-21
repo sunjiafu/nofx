@@ -327,6 +327,15 @@ func (t *FuturesTrader) invalidateCache() {
 	log.Printf("  🔄 已清空缓存，下次查询将获取最新数据")
 }
 
+// InvalidatePositionsCache 只清空持仓缓存（用于开仓前强制刷新）
+func (t *FuturesTrader) InvalidatePositionsCache() {
+	t.positionsCacheMutex.Lock()
+	t.cachedPositions = nil
+	t.positionsCacheMutex.Unlock()
+
+	log.Printf("  🔄 已清空持仓缓存，下次查询将从API获取最新持仓")
+}
+
 // SetLeverage 设置杠杆（智能判断+冷却期）
 func (t *FuturesTrader) SetLeverage(symbol string, leverage int) error {
 	// ✅ 修复API限流问题：不再强制清空缓存，使用现有缓存判断杠杆
